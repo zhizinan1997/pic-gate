@@ -1,4 +1,4 @@
-# 🖼️ PicGate - AI 绘图网关
+# 🖼️ PicGate - AI 绘图网关图床
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.11+-blue.svg" alt="Python">
