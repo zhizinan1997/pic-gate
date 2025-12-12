@@ -1,281 +1,385 @@
-# PicGate - OpenWebUI AI 绘图网关
+# 🖼️ PicGate - AI 绘图网关
 
-🖼️ 面向 OpenWebUI 的 AI 绘图网关/中转 + 本地缓存 + R2 归档 + 管理后台
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.11+-blue.svg" alt="Python">
+  <img src="https://img.shields.io/badge/FastAPI-0.100+-green.svg" alt="FastAPI">
+  <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License">
+  <img src="https://img.shields.io/badge/Docker-Ready-2496ED.svg" alt="Docker">
+</p>
 
-## 功能特性
+PicGate 是一个专为 OpenWebUI 设计的 AI 绘图网关，解决 AI 生成图片无法正确显示的问题。它将 AI 返回的 Base64 图片数据转换为可访问的 URL，并支持本地缓存和 Cloudflare R2 云存储。
 
-- **OpenAI 兼容 API** - 对 OpenWebUI 暴露标准的 `/v1/*` 接口
-- **URL→Base64 转换** - 自动将图片 URL 转换为 base64 后发送到上游 AI
-- **本地缓存** - 生成的图片先存本地，返回 URL 给 OpenWebUI
-- **R2 云存储** - 异步上传到 Cloudflare R2 长期归档
-- **TTL 清理** - 自动清理过期的本地缓存
-- **R2 回源** - 本地缺失时自动从 R2 下载
-- **管理后台** - Web 界面配置所有设置
+## ✨ 核心特性
 
-## 快速开始
+- 🔄 **Base64 转 URL** - 自动将 AI 返回的 Base64 图片转换为可访问的 HTTP URL
+- 💾 **本地缓存** - 图片保存在本地，支持 TTL 自动过期清理
+- ☁️ **R2 云存储** - 可选的 Cloudflare R2 存储，永久保存图片
+- 🔌 **OpenAI 兼容** - 完全兼容 OpenAI API 格式，无缝对接 OpenWebUI
+- 🛡️ **安全访问** - 支持 API 密钥认证
+- 📊 **管理后台** - 完整的中文管理界面
 
-### 1. 环境准备
+## 🚀 快速开始
 
-```bash
-# 克隆项目
-git clone https://github.com/your-repo/pic-gate.git
-cd pic-gate
-
-# 复制环境变量
-cp .env.example .env
-
-# 安装依赖
-pip install -r requirements.txt
-```
-
-### 2. 启动服务
+### Docker 部署（推荐）
 
 ```bash
-# 开发模式
-python -m uvicorn app.main:app --host 0.0.0.0 --port 5643 --reload
-
-# 生产模式
-python -m uvicorn app.main:app --host 0.0.0.0 --port 5643
-```
-
-### 3. 初始设置
-
-1. 访问 `http://localhost:5643/admin`
-2. 创建管理员账号
-3. 配置上游 AI API（API Base URL、API Key、模型名）
-4. 配置网关（模型名、API Key）
-5. **重要**：配置 `公开基础 URL`（见下文）
-
-## 配置说明
-
-### 公开基础 URL（重要！）
-
-`public_base_url` 控制返回给 OpenWebUI 的图片 URL 域名：
-
-| 场景             | 设置值                    |
-| ---------------- | ------------------------- |
-| 同机运行，无反代 | `http://服务器IP:5643`    |
-| 使用反向代理     | `https://img.example.com` |
-| 留空             | 自动从请求头推断          |
-
-**反向代理用户必须设置此项！** 否则图片 URL 可能不正确。
-
-### OpenWebUI 配置
-
-在 OpenWebUI 中添加图片生成模型：
-
-1. 进入 管理 → 设置 → 图片
-2. 设置 URL：`http://picgate-ip:5643/v1`
-3. 设置 API Key：（管理后台生成的网关 API Key）
-4. 设置模型：（管理后台配置的网关模型名，默认 `picgate`）
-
-## Docker 部署
-
-```bash
-# 构建镜像
-docker build -t picgate .
+# 使用 GitHub Container Registry
+docker pull ghcr.io/zhizinan1997/pic-gate:latest
 
 # 运行容器
 docker run -d \
   --name picgate \
   -p 5643:5643 \
   -v picgate-data:/app/data \
-  picgate
+  ghcr.io/zhizinan1997/pic-gate:latest
 ```
 
-### Docker Compose
+### Docker Compose 部署
 
 ```yaml
 version: "3.8"
 services:
   picgate:
-    build: .
+    image: ghcr.io/zhizinan1997/pic-gate:latest
+    container_name: picgate
     ports:
       - "5643:5643"
     volumes:
       - picgate-data:/app/data
-    environment:
-      - HOST=0.0.0.0
-      - PORT=5643
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5643/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
 volumes:
   picgate-data:
 ```
 
-## 反向代理配置
+### 本地开发
 
-### Nginx
+```bash
+# 克隆项目
+git clone https://github.com/zhizinan1997/pic-gate.git
+cd pic-gate
 
-```nginx
-server {
-    listen 443 ssl;
-    server_name img.example.com;
+# 安装依赖
+pip install -r requirements.txt
 
-    location / {
-        proxy_pass http://127.0.0.1:5643;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Host $host;
-    }
-}
+# 启动服务
+uvicorn app.main:app --host 0.0.0.0 --port 5643 --reload
 ```
 
-### Caddy
+## ⚙️ 初始配置
 
-```caddyfile
-img.example.com {
-    reverse_proxy localhost:5643
-}
+1. 访问管理后台：`http://localhost:5643/admin`
+2. 首次访问会要求创建管理员账户
+3. 登录后配置上游 AI API 和网关设置
+
+## 📖 管理后台功能详解
+
+### 🏠 仪表盘
+
+仪表盘页面提供系统状态的整体概览：
+
+| 统计项      | 说明                                  |
+| ----------- | ------------------------------------- |
+| 📊 总图片数 | 系统中所有图片的数量（包括本地和 R2） |
+| 💾 本地缓存 | 本地存储的图片数量                    |
+| ☁️ R2 存储  | 已上传到 R2 的图片数量                |
+| 📁 磁盘使用 | 本地图片占用的磁盘空间                |
+| ⏳ 待上传   | 等待上传到 R2 的图片数量              |
+| ❌ 上传失败 | R2 上传失败的图片数量                 |
+
+---
+
+### ⚙️ 设置
+
+设置页面用于配置所有系统参数，支持**自动保存**（修改后 2 秒自动保存）。
+
+#### 🤖 上游 AI API
+
+| 设置项       | 说明                      | 示例                        |
+| ------------ | ------------------------- | --------------------------- |
+| API 基础 URL | 上游 AI 服务的 API 地址   | `https://api.openai.com/v1` |
+| API 密钥     | 上游服务的认证密钥        | `sk-xxx...`                 |
+| 模型名称     | 用于图片生成的模型        | `dall-e-3`                  |
+| 🔗 测试连接  | 点击验证 API 配置是否正确 | -                           |
+
+#### 🌐 网关配置
+
+| 设置项        | 说明                        | 示例                      |
+| ------------- | --------------------------- | ------------------------- |
+| 网关模型名称  | 对外暴露的模型名称          | `picgate`                 |
+| 网关 API 密钥 | OpenWebUI 连接时使用的密钥  | `pg-xxx...`               |
+| 生成密钥      | 自动生成随机密钥            | -                         |
+| 公共基础 URL  | 返回给客户端的图片 URL 前缀 | `https://img.example.com` |
+
+#### ☁️ Cloudflare R2 存储
+
+| 设置项            | 说明                              |
+| ----------------- | --------------------------------- |
+| 账户 ID           | Cloudflare 账户 ID                |
+| Access Key ID     | R2 API Token 的 Access Key ID     |
+| Secret Access Key | R2 API Token 的 Secret Access Key |
+| 存储桶名称        | R2 存储桶名称                     |
+| ☁️ 测试连接       | 点击验证 R2 配置是否正确          |
+
+#### ⏰ 缓存配置
+
+| 设置项       | 说明                     | 默认值  |
+| ------------ | ------------------------ | ------- |
+| 本地缓存 TTL | 本地文件保留时间（小时） | 72 小时 |
+| 元数据保留期 | 数据库记录保留时间（天） | 365 天  |
+
+#### 🔐 安全设置
+
+| 设置项                   | 说明                             | 默认值 |
+| ------------------------ | -------------------------------- | ------ |
+| 允许外部图片获取         | 是否允许下载外部图片 URL         | 关闭   |
+| 元数据过期时删除 R2 对象 | 元数据过期时是否同步删除 R2 对象 | 关闭   |
+
+---
+
+### 🗑️ 缓存管理
+
+缓存管理页面用于管理本地图片缓存。
+
+#### 缓存统计
+
+- **本地图片数**：当前本地存储的图片数量
+- **磁盘使用**：本地缓存占用的磁盘空间
+- **待上传数**：等待上传到 R2 的图片
+- **上传失败数**：R2 上传失败的图片
+
+#### 缓存操作
+
+| 操作                | 说明                                         |
+| ------------------- | -------------------------------------------- |
+| 🧹 清理过期缓存     | 删除超过 TTL 的本地文件                      |
+| 🗑️ 清除所有本地缓存 | 删除所有本地图片（保留 R2 和元数据，可恢复） |
+| ☁️ 上传到 R2        | 将待处理的图片上传到 R2                      |
+| 🔄 重试失败上传     | 重新尝试上传失败的图片                       |
+
+#### 📦 缓存大小限制
+
+可设置本地缓存的最大大小（MB）。当达到限制时，系统会**自动清理最早的图片**直到低于限制值。
+
+- 设为 `0` 表示不限制
+- 进度条显示当前使用量
+- 超过 80% 显示黄色警告
+- 超过 95% 显示红色警告
+
+---
+
+### 🖼️ 图片预览
+
+图片预览页面提供图片网格浏览和管理功能。
+
+#### 功能说明
+
+| 功能     | 说明                             |
+| -------- | -------------------------------- |
+| 🔄 刷新  | 重新加载图片列表                 |
+| 排序选择 | 按创建时间/访问时间/文件大小排序 |
+| ☐ 全选   | 选择当前页面所有图片             |
+| 🔲 单选  | 勾选单张图片                     |
+
+#### 批量删除
+
+| 操作        | 说明                               |
+| ----------- | ---------------------------------- |
+| 🗑️ 删除本地 | 仅删除选中图片的本地缓存           |
+| ☁️ 删除 R2  | 仅删除选中图片的 R2 存储           |
+| ❌ 全部删除 | 删除本地 + R2 + 元数据（不可恢复） |
+
+#### 图片卡片
+
+每张图片显示：
+
+- 缩略图预览
+- 图片 ID（前 8 位）
+- 文件大小和创建时间
+- 存储状态标签：
+  - 🟢 **本地**：有本地缓存
+  - 🔵 **R2**：已上传到 R2
+
+#### 大图预览
+
+点击图片可查看大图，并可在预览界面直接删除。
+
+---
+
+### 📋 日志
+
+日志页面显示系统运行日志，便于调试和监控。
+
+#### 日志内容
+
+日志按时间倒序显示，包含：
+
+- ⏰ **时间戳**：日志产生时间
+- 📊 **级别**：INFO（绿色）、WARNING（黄色）、ERROR（红色）
+- 📝 **消息**：详细日志内容
+
+#### 日志类型示例
+
+```
+📤 发起文生图请求: prompt=画一只可爱的猫...
+📥 上游返回成功: 收到 1 张图片
+✅ 文生图完成: a1b2c3d4...
+📤 发起对话请求: 3 条消息
+📥 上游对话返回成功
+✅ 对话图片已保存: e5f6g7h8...
+❌ 上游返回错误: HTTP 401
+🧹 自动清理: 删除 5 张最早的图片，保持在 500MB 限制内
 ```
 
-## API 端点
+#### 操作按钮
 
-### Gateway API（需要 Bearer 认证）
+| 按钮        | 说明                  |
+| ----------- | --------------------- |
+| 🔄 刷新日志 | 手动刷新日志内容      |
+| 🗑️ 清除日志 | 清空所有日志记录      |
+| ☐ 自动刷新  | 开启后每 5 秒自动刷新 |
 
-| 端点                          | 说明                 |
-| ----------------------------- | -------------------- |
-| `GET /v1/models`              | 获取可用模型列表     |
-| `POST /v1/images/generations` | 文生图               |
-| `POST /v1/images/edits`       | 图生图/编辑          |
-| `POST /v1/chat/completions`   | 多轮对话（支持图片） |
+---
 
-### 图片服务
+## 🔌 API 端点
 
-| 端点                     | 说明                     |
-| ------------------------ | ------------------------ |
-| `GET /images/{image_id}` | 获取图片（本地/R2 回源） |
+### OpenAI 兼容端点
 
-### 管理后台
+| 端点                     | 方法 | 说明                          |
+| ------------------------ | ---- | ----------------------------- |
+| `/v1/models`             | GET  | 获取可用模型列表              |
+| `/v1/images/generations` | POST | 文生图接口                    |
+| `/v1/images/edits`       | POST | 图片编辑接口                  |
+| `/v1/chat/completions`   | POST | 聊天补全（支持图片输入/输出） |
 
-| 端点                   | 说明         |
-| ---------------------- | ------------ |
-| `GET /admin`           | 管理后台入口 |
-| `GET /admin/dashboard` | 仪表盘       |
-| `GET /admin/settings`  | 配置设置     |
-| `GET /admin/cache`     | 缓存管理     |
+### 图片访问
 
-## Cloudflare R2 配置（详细教程）
+| 端点                 | 方法 | 说明                    |
+| -------------------- | ---- | ----------------------- |
+| `/images/{image_id}` | GET  | 访问图片（自动回源 R2） |
 
-Cloudflare R2 是一个 S3 兼容的对象存储服务，用于图片的长期归档。以下是详细的申请和配置步骤。
+### 系统端点
 
-### 步骤 1：注册/登录 Cloudflare
+| 端点      | 方法 | 说明     |
+| --------- | ---- | -------- |
+| `/health` | GET  | 健康检查 |
 
-1. 访问 [Cloudflare Dashboard](https://dash.cloudflare.com/)
-2. 注册新账号或登录已有账号
-3. 完成邮箱验证
+---
 
-### 步骤 2：获取 Account ID
+## 🔧 OpenWebUI 配置
 
-1. 登录后，在左侧菜单点击 **R2 对象存储**
-2. 如果首次使用，需要点击 **开始使用** 激活 R2
-3. 在 R2 概览页面，右侧会显示 **账户 ID (Account ID)**
-4. 复制此 ID（格式类似：`a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6`）
+在 OpenWebUI 中添加 PicGate 作为图片生成服务：
 
-> 💡 **提示**：Account ID 也可以在任意域名的概览页面右下角找到
+1. 打开 OpenWebUI 设置 → 图片
+2. 选择 "OpenAI DALL-E"
+3. 配置：
+   - **API Base URL**: `http://your-picgate-host:5643/v1`
+   - **API Key**: 你在 PicGate 设置的网关 API 密钥
+   - **Model**: 你在 PicGate 设置的网关模型名称（如 `picgate`）
 
-### 步骤 3：创建 R2 存储桶
+---
 
-1. 在 R2 页面点击 **创建存储桶**
-2. 输入存储桶名称（例如：`picgate-images`）
-   - 名称只能包含小写字母、数字和连字符
-   - 名称需全局唯一
-3. 选择位置（建议选择靠近您服务器的区域）
-   - **自动** - Cloudflare 自动选择最优位置
-   - 或选择特定区域如 `亚太地区`
-4. 点击 **创建存储桶**
+## ☁️ Cloudflare R2 配置指南
 
-### 步骤 4：创建 R2 API 令牌
+### 1. 获取账户 ID
 
-这是获取 Access Key ID 和 Secret Access Key 的关键步骤：
+1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com)
+2. 左侧菜单选择 **R2 对象存储**
+3. 右侧面板可以看到 **账户 ID**
 
-1. 在 R2 页面，点击右侧的 **管理 R2 API 令牌**
-2. 点击 **创建 API 令牌**
-3. 配置令牌：
-   - **令牌名称**：输入一个描述性名称（如 `picgate-token`）
-   - **权限**：选择 **对象读和写**（这允许上传和下载）
-   - **指定存储桶**：
-     - 选择 **仅应用于特定存储桶**
-     - 选择刚创建的存储桶（如 `picgate-images`）
-   - **TTL**：可选，设置令牌有效期（留空为永久）
-4. 点击 **创建 API 令牌**
-5. **重要**：立即复制显示的凭证：
-   - **Access Key ID** 访问密钥 ID （格式：`xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`）
-   - **Secret Access Key** 机密访问密钥（只显示一次！格式：`xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`）
+### 2. 创建 R2 存储桶
 
-> ⚠️ **警告**：Secret Access Key 只会显示一次，请务必立即保存！如果丢失，需要重新创建令牌。
+1. 点击 **创建存储桶**
+2. 输入存储桶名称（如 `picgate-images`）
+3. 选择位置（建议选择亚太地区）
 
-### 步骤 5：在 PicGate 中配置
+### 3. 创建 API Token
 
-1. 访问 PicGate 管理后台 → **设置**
-2. 找到 **Cloudflare R2 存储** 部分
-3. 填入以下信息：
+1. 在 R2 页面，点击 **管理 R2 API Token**
+2. 点击 **创建 API Token**
+3. 权限选择 **对象读写** 或 **管理员读写**
+4. 指定存储桶（可选择所有或特定存储桶）
+5. 创建后记录：
+   - **Access Key ID**
+   - **Secret Access Key**
 
-| 字段              | 说明                      | 示例                               |
-| ----------------- | ------------------------- | ---------------------------------- |
-| Account ID        | 步骤 2 获取的账户 ID      | `a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6` |
-| Access Key ID     | 步骤 4 创建的访问密钥 ID  | `xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` |
-| Secret Access Key | 步骤 4 创建的秘密访问密钥 | `xxxxxxxx...`                      |
-| Bucket Name       | 步骤 3 创建的存储桶名称   | `picgate-images`                   |
+---
 
-4. 点击 **保存设置**
+## 🛠️ 技术栈
 
-### 验证配置
+| 组件        | 技术                    |
+| ----------- | ----------------------- |
+| 后端框架    | FastAPI                 |
+| 数据库      | SQLite + SQLAlchemy     |
+| 模板引擎    | Jinja2                  |
+| HTTP 客户端 | HTTPX                   |
+| 云存储      | Cloudflare R2 (S3 兼容) |
+| 容器化      | Docker                  |
 
-配置完成后，可以通过以下方式验证：
+---
 
-1. 在管理后台生成一张测试图片
-2. 进入 **缓存管理** 页面
-3. 点击 **上传到 R2** 按钮
-4. 查看是否有上传成功的提示
+## 📝 环境变量
 
-### R2 存储结构
+| 变量           | 说明             | 默认值                                     |
+| -------------- | ---------------- | ------------------------------------------ |
+| `HOST`         | 监听地址         | `0.0.0.0`                                  |
+| `PORT`         | 监听端口         | `5643`                                     |
+| `DATABASE_URL` | 数据库连接字符串 | `sqlite+aiosqlite:///./data/db/picgate.db` |
+| `IMAGES_DIR`   | 图片存储目录     | `./data/images`                            |
 
-图片会以以下格式存储在 R2 中：
+---
+
+## 🔄 工作流程
 
 ```
-{bucket-name}/
-└── openwebui/
-    ├── {image-id-1}.png
-    ├── {image-id-2}.png
-    └── ...
+OpenWebUI
+    │
+    ▼ (1) 请求绘图 (Base64)
+┌─────────────────┐
+│    PicGate      │
+│                 │
+│  ┌───────────┐  │
+│  │ 上游 API  │◄─┼── (2) 转发请求
+│  └───────────┘  │
+│        │        │
+│        ▼        │
+│  ┌───────────┐  │
+│  │ 本地存储  │  │◄── (3) 保存 Base64 为文件
+│  └───────────┘  │
+│        │        │
+│        ▼        │
+│  ┌───────────┐  │
+│  │  R2 存储  │  │◄── (4) 异步上传到云端
+│  └───────────┘  │
+│        │        │
+└────────┼────────┘
+         │
+         ▼ (5) 返回图片 URL
+    OpenWebUI
+         │
+         ▼ (6) 请求图片
+    ┌─────────────────┐
+    │    PicGate      │
+    │  /images/{id}   │
+    └─────────────────┘
+         │
+         ▼ (7) 返回图片
+    OpenWebUI 显示
 ```
 
-### R2 免费额度
+---
 
-Cloudflare R2 提供慷慨的免费额度：
+## 🤝 贡献
 
-| 项目     | 免费额度             |
-| -------- | -------------------- |
-| 存储空间 | 10 GB/月             |
-| A 类操作 | 100 万次/月（写入）  |
-| B 类操作 | 1000 万次/月（读取） |
-| 出站流量 | 免费（无出站费用！） |
+欢迎提交 Issue 和 Pull Request！
 
-对于大多数个人使用场景，免费额度完全够用。
+---
 
-## 数据目录
-
-```
-data/
-├── db/
-│   └── picgate.db      # SQLite 数据库
-└── images/
-    └── *.png           # 本地缓存的图片
-```
-
-## 技术栈
-
-- **Python 3.11+**
-- **FastAPI** - Web 框架
-- **SQLAlchemy** - ORM
-- **SQLite** - 数据库
-- **boto3** - R2 (S3) 客户端
-- **httpx** - HTTP 客户端
-- **Jinja2** - 模板引擎
-
-## 许可证
+## 📄 许可证
 
 MIT License
