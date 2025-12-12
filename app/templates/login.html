@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PicGate - 登录</title>
+    <link rel="stylesheet" href="/static/admin.css">
+</head>
+<body class="auth-page">
+    <div class="auth-container">
+        <div class="auth-card">
+            <div class="auth-header">
+                <h1>🖼️ PicGate</h1>
+                <p>OpenWebUI AI 绘图网关</p>
+            </div>
+            
+            <div class="auth-body">
+                <h2>管理员登录</h2>
+                
+                <div id="setupSuccess" class="success-message" style="display: none;">
+                    账号创建成功！请登录。
+                </div>
+                
+                <form id="loginForm">
+                    <div class="form-group">
+                        <label for="username">用户名</label>
+                        <input type="text" id="username" name="username" required autocomplete="username">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="password">密码</label>
+                        <input type="password" id="password" name="password" required autocomplete="current-password">
+                    </div>
+                    
+                    <div id="error" class="error-message" style="display: none;"></div>
+                    
+                    <button type="submit" class="btn btn-primary btn-block">登录</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Show setup success message if redirected from setup
+        if (window.location.search.includes('setup=success')) {
+            document.getElementById('setupSuccess').style.display = 'block';
+        }
+
+        const form = document.getElementById('loginForm');
+        const errorDiv = document.getElementById('error');
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            errorDiv.style.display = 'none';
+
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+
+            try {
+                const response = await fetch('/admin/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    window.location.href = '/admin/dashboard';
+                } else {
+                    errorDiv.textContent = data.detail || '登录失败';
+                    errorDiv.style.display = 'block';
+                }
+            } catch (err) {
+                errorDiv.textContent = '网络错误，请重试。';
+                errorDiv.style.display = 'block';
+            }
+        });
+    </script>
+</body>
+</html>

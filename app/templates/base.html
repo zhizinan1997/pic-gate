@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{% block title %}PicGate 管理后台{% endblock %}</title>
+    <link rel="stylesheet" href="/static/admin.css" />
+    {% block head %}{% endblock %}
+  </head>
+  <body>
+    {% block nav %} {% if username %}
+    <nav class="navbar">
+      <div class="nav-brand">
+        <a href="/admin/dashboard">🖼️ PicGate</a>
+      </div>
+      <div class="nav-links">
+        <a href="/admin/dashboard" class="nav-link">仪表盘</a>
+        <a href="/admin/settings" class="nav-link">设置</a>
+        <a href="/admin/cache" class="nav-link">缓存管理</a>
+        <a href="/admin/images" class="nav-link">图片预览</a>
+        <a href="/admin/logs" class="nav-link">日志</a>
+      </div>
+      <div class="nav-user">
+        <span class="username">{{ username }}</span>
+        <button onclick="logout()" class="btn btn-sm">退出登录</button>
+      </div>
+    </nav>
+    {% endif %} {% endblock %}
+
+    <main class="container">{% block content %}{% endblock %}</main>
+
+    <script>
+      async function logout() {
+        await fetch("/admin/api/logout", { method: "POST" });
+        window.location.href = "/admin/login";
+      }
+
+      function showMessage(msg, isError = false) {
+        const div = document.createElement("div");
+        div.className = "message " + (isError ? "error" : "success");
+        div.textContent = msg;
+        document.querySelector(".container").prepend(div);
+        setTimeout(() => div.remove(), 5000);
+      }
+    </script>
+    {% block scripts %}{% endblock %}
+  </body>
+</html>

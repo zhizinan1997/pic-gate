@@ -1,0 +1,467 @@
+{% extends "base.html" %}
+
+{% block title %}设置 - PicGate 管理后台{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>设置</h1>
+    <p>配置 PicGate 绘图网关</p>
+</div>
+
+<form id="settingsForm">
+    <!-- Upstream AI Configuration -->
+    <div class="card">
+        <div class="card-header">
+            <h2>🤖 上游 AI API</h2>
+            <p class="card-subtitle">配置 AI 图片生成服务</p>
+        </div>
+        <div class="card-body">
+            <div class="form-group">
+                <label for="upstream_api_base">API 基础 URL</label>
+                <input type="url" id="upstream_api_base" name="upstream_api_base" placeholder="https://api.openai.com/v1">
+                <small>上游 AI API 的基础地址（OpenAI 兼容格式）</small>
+            </div>
+            
+            <div class="form-group">
+                <label for="upstream_api_key">API 密钥</label>
+                <input type="password" id="upstream_api_key" name="upstream_api_key" placeholder="sk-...">
+                <small>上游 API 密钥</small>
+            </div>
+            
+            <div class="form-group">
+                <label for="upstream_model_name">模型名称</label>
+                <input type="text" id="upstream_model_name" name="upstream_model_name" placeholder="dall-e-3">
+                <small>用于图片生成的模型</small>
+            </div>
+            
+            <div class="form-group">
+                <button type="button" class="btn btn-primary" onclick="testUpstream()">🔗 测试上游 API 连接</button>
+                <span id="upstreamTestResult" class="test-result"></span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Gateway Configuration -->
+    <div class="card">
+        <div class="card-header">
+            <h2>🌐 网关配置</h2>
+            <p class="card-subtitle">OpenWebUI 连接此网关的设置</p>
+        </div>
+        <div class="card-body">
+            <div class="form-group">
+                <label for="gateway_model_name">网关模型名称</label>
+                <input type="text" id="gateway_model_name" name="gateway_model_name" placeholder="picgate">
+                <small>对外暴露给 OpenWebUI 的模型名称（显示在 /v1/models）</small>
+            </div>
+            
+            <div class="form-group">
+                <label for="gateway_api_key">网关 API 密钥</label>
+                <div class="input-group">
+                    <input type="text" id="gateway_api_key" name="gateway_api_key" placeholder="pg-...">
+                    <button type="button" class="btn btn-secondary" onclick="generateKey()">生成</button>
+                </div>
+                <small>OpenWebUI 连接此网关时使用的 API 密钥</small>
+            </div>
+        </div>
+    </div>
+
+    <!-- Public URL Configuration (CRITICAL) -->
+    <div class="card card-important">
+        <div class="card-header">
+            <h2>🔗 公开 URL 配置</h2>
+            <p class="card-subtitle">重要：控制返回给 OpenWebUI 的图片 URL 域名</p>
+        </div>
+        <div class="card-body">
+            <div class="alert alert-info">
+                <strong>这是什么？</strong> 这是网关的公开访问基址。
+                返回给 OpenWebUI 的所有图片 URL 都将使用此域名。
+            </div>
+            
+            <div class="form-group">
+                <label for="public_base_url">公开基础 URL</label>
+                <input type="url" id="public_base_url" name="public_base_url" placeholder="https://img.example.com">
+                <small>
+                    <strong>示例：</strong><br>
+                    • 同机运行，无反代：<code>http://服务器IP:5643</code><br>
+                    • 使用反向代理：<code>https://img.example.com</code><br>
+                    • 留空则自动从请求头推断
+                </small>
+            </div>
+            
+            <div class="alert alert-warning">
+                <strong>反向代理用户注意：</strong> 如果您使用 nginx/Caddy 代理此网关，
+                必须设置为您的公开域名（如 <code>https://img.example.com</code>）。
+                否则图片 URL 可能不正确。
+            </div>
+        </div>
+    </div>
+
+    <!-- R2 Storage Configuration -->
+    <div class="card">
+        <div class="card-header">
+            <h2>☁️ Cloudflare R2 存储</h2>
+            <p class="card-subtitle">可选的云存储，用于图片长期归档</p>
+        </div>
+        <div class="card-body">
+            <div class="form-group">
+                <label for="r2_account_id">账户 ID</label>
+                <input type="text" id="r2_account_id" name="r2_account_id" placeholder="your-account-id">
+            </div>
+            
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="r2_access_key_id">Access Key ID</label>
+                    <input type="text" id="r2_access_key_id" name="r2_access_key_id">
+                </div>
+                
+                <div class="form-group">
+                    <label for="r2_secret_access_key">Secret Access Key</label>
+                    <input type="password" id="r2_secret_access_key" name="r2_secret_access_key">
+                </div>
+            </div>
+            
+            <div class="form-group">
+                <label for="r2_bucket_name">存储桶名称</label>
+                <input type="text" id="r2_bucket_name" name="r2_bucket_name" placeholder="my-picgate-bucket">
+            </div>
+            
+            <div class="form-group">
+                <button type="button" class="btn btn-primary" onclick="testR2()">☁️ 测试 R2 连接</button>
+                <span id="r2TestResult" class="test-result"></span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Cache Configuration -->
+    <div class="card">
+        <div class="card-header">
+            <h2>⏰ 缓存配置</h2>
+            <p class="card-subtitle">本地缓存和元数据保留设置</p>
+        </div>
+        <div class="card-body">
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="local_cache_ttl_hours">本地缓存 TTL（小时）</label>
+                    <select id="local_cache_ttl_hours" name="local_cache_ttl_hours">
+                        <option value="24">24 小时（1 天）</option>
+                        <option value="72">72 小时（3 天）</option>
+                        <option value="168">168 小时（7 天）</option>
+                        <option value="720">720 小时（30 天）</option>
+                    </select>
+                    <small>图片在本地缓存中保留多久</small>
+                </div>
+                
+                <div class="form-group">
+                    <label for="metadata_retention_days">元数据保留期（天）</label>
+                    <input type="number" id="metadata_retention_days" name="metadata_retention_days" min="30" max="3650" value="365">
+                    <small>图片元数据在数据库中保留多久</small>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Security Configuration -->
+    <div class="card">
+        <div class="card-header">
+            <h2>🔒 安全设置</h2>
+        </div>
+        <div class="card-body">
+            <div class="form-group checkbox-group">
+                <label>
+                    <input type="checkbox" id="allow_external_image_fetch" name="allow_external_image_fetch">
+                    允许获取外部图片
+                </label>
+                <small>启用后，网关可以从外部 URL 下载图片。出于安全考虑建议禁用。</small>
+            </div>
+            
+            <div class="form-group checkbox-group">
+                <label>
+                    <input type="checkbox" id="delete_r2_on_metadata_expire" name="delete_r2_on_metadata_expire">
+                    元数据过期时删除 R2 对象
+                </label>
+                <small>启用后，元数据过期时会同时删除 R2 中的对象。否则只删除本地元数据。</small>
+            </div>
+        </div>
+    </div>
+
+    <div class="form-actions">
+        <button type="submit" class="btn btn-primary btn-lg">保存设置</button>
+    </div>
+</form>
+
+<div id="message" class="message" style="display: none;"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    const form = document.getElementById('settingsForm');
+    const messageDiv = document.getElementById('message');
+
+    async function loadSettings() {
+        try {
+            const response = await fetch('/admin/api/settings/full');
+            if (response.status === 401) {
+                window.location.href = '/admin/login';
+                return;
+            }
+            const settings = await response.json();
+            
+            // Populate form fields
+            document.getElementById('upstream_api_base').value = settings.upstream_api_base || '';
+            document.getElementById('upstream_api_key').value = settings.upstream_api_key || '';
+            document.getElementById('upstream_model_name').value = settings.upstream_model_name || '';
+            document.getElementById('gateway_model_name').value = settings.gateway_model_name || '';
+            document.getElementById('gateway_api_key').value = settings.gateway_api_key || '';
+            document.getElementById('public_base_url').value = settings.public_base_url || '';
+            document.getElementById('r2_account_id').value = settings.r2_account_id || '';
+            document.getElementById('r2_access_key_id').value = settings.r2_access_key_id || '';
+            document.getElementById('r2_secret_access_key').value = settings.r2_secret_access_key || '';
+            document.getElementById('r2_bucket_name').value = settings.r2_bucket_name || '';
+            document.getElementById('local_cache_ttl_hours').value = settings.local_cache_ttl_hours || 72;
+            document.getElementById('metadata_retention_days').value = settings.metadata_retention_days || 365;
+            document.getElementById('allow_external_image_fetch').checked = settings.allow_external_image_fetch || false;
+            document.getElementById('delete_r2_on_metadata_expire').checked = settings.delete_r2_on_metadata_expire || false;
+        } catch (err) {
+            console.error('加载设置失败:', err);
+            showMessage('加载设置失败', true);
+        }
+    }
+
+    async function generateKey() {
+        try {
+            const response = await fetch('/admin/api/settings/generate-key', { method: 'POST' });
+            const data = await response.json();
+            document.getElementById('gateway_api_key').value = data.key;
+        } catch (err) {
+            console.error('生成密钥失败:', err);
+        }
+    }
+
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        
+        const data = {
+            upstream_api_base: document.getElementById('upstream_api_base').value,
+            upstream_api_key: document.getElementById('upstream_api_key').value,
+            upstream_model_name: document.getElementById('upstream_model_name').value,
+            gateway_model_name: document.getElementById('gateway_model_name').value,
+            gateway_api_key: document.getElementById('gateway_api_key').value,
+            public_base_url: document.getElementById('public_base_url').value,
+            r2_account_id: document.getElementById('r2_account_id').value,
+            r2_access_key_id: document.getElementById('r2_access_key_id').value,
+            r2_secret_access_key: document.getElementById('r2_secret_access_key').value,
+            r2_bucket_name: document.getElementById('r2_bucket_name').value,
+            local_cache_ttl_hours: parseInt(document.getElementById('local_cache_ttl_hours').value),
+            metadata_retention_days: parseInt(document.getElementById('metadata_retention_days').value),
+            allow_external_image_fetch: document.getElementById('allow_external_image_fetch').checked,
+            delete_r2_on_metadata_expire: document.getElementById('delete_r2_on_metadata_expire').checked,
+        };
+
+        try {
+            const response = await fetch('/admin/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            });
+
+            if (response.ok) {
+                showMessage('设置已保存！');
+            } else {
+                const error = await response.json();
+                showMessage(error.detail || '保存设置失败', true);
+            }
+        } catch (err) {
+            showMessage('网络错误，请重试。', true);
+        }
+    });
+
+    function showMessage(msg, isError = false) {
+        messageDiv.textContent = msg;
+        messageDiv.className = 'message ' + (isError ? 'error' : 'success');
+        messageDiv.style.display = 'block';
+        setTimeout(() => messageDiv.style.display = 'none', 5000);
+    }
+
+    async function testUpstream() {
+        const resultEl = document.getElementById('upstreamTestResult');
+        resultEl.textContent = '测试中...';
+        resultEl.className = 'test-result testing';
+        
+        try {
+            const response = await fetch('/admin/api/settings/test-upstream', { method: 'POST' });
+            const data = await response.json();
+            
+            resultEl.textContent = data.message;
+            resultEl.className = 'test-result ' + (data.success ? 'success' : 'error');
+        } catch (err) {
+            resultEl.textContent = '测试失败';
+            resultEl.className = 'test-result error';
+        }
+    }
+
+    async function testR2() {
+        const resultEl = document.getElementById('r2TestResult');
+        resultEl.textContent = '测试中...';
+        resultEl.className = 'test-result testing';
+        
+        try {
+            const response = await fetch('/admin/api/settings/test-r2', { method: 'POST' });
+            const data = await response.json();
+            
+            resultEl.textContent = data.message;
+            resultEl.className = 'test-result ' + (data.success ? 'success' : 'error');
+        } catch (err) {
+            resultEl.textContent = '测试失败';
+            resultEl.className = 'test-result error';
+        }
+    }
+
+    // Auto-save functionality
+    let autoSaveTimeout = null;
+    const autoSaveDelay = 2000; // 2 seconds after last change
+
+    function enableAutoSave() {
+        const inputs = form.querySelectorAll('input, select');
+        inputs.forEach(input => {
+            input.addEventListener('change', triggerAutoSave);
+            input.addEventListener('input', triggerAutoSave);
+        });
+    }
+
+    function triggerAutoSave() {
+        // Clear previous timeout
+        if (autoSaveTimeout) {
+            clearTimeout(autoSaveTimeout);
+        }
+        
+        // Show saving indicator
+        showAutoSaveStatus('saving');
+        
+        // Set new timeout
+        autoSaveTimeout = setTimeout(async () => {
+            await saveSettings(true);
+        }, autoSaveDelay);
+    }
+
+    async function saveSettings(isAutoSave = false) {
+        const data = {
+            upstream_api_base: document.getElementById('upstream_api_base').value,
+            upstream_api_key: document.getElementById('upstream_api_key').value,
+            upstream_model_name: document.getElementById('upstream_model_name').value,
+            gateway_model_name: document.getElementById('gateway_model_name').value,
+            gateway_api_key: document.getElementById('gateway_api_key').value,
+            public_base_url: document.getElementById('public_base_url').value,
+            r2_account_id: document.getElementById('r2_account_id').value,
+            r2_access_key_id: document.getElementById('r2_access_key_id').value,
+            r2_secret_access_key: document.getElementById('r2_secret_access_key').value,
+            r2_bucket_name: document.getElementById('r2_bucket_name').value,
+            local_cache_ttl_hours: parseInt(document.getElementById('local_cache_ttl_hours').value),
+            metadata_retention_days: parseInt(document.getElementById('metadata_retention_days').value),
+            allow_external_image_fetch: document.getElementById('allow_external_image_fetch').checked,
+            delete_r2_on_metadata_expire: document.getElementById('delete_r2_on_metadata_expire').checked,
+        };
+
+        try {
+            const response = await fetch('/admin/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            });
+
+            if (response.ok) {
+                if (isAutoSave) {
+                    showAutoSaveStatus('saved');
+                } else {
+                    showMessage('设置已保存！');
+                }
+            } else {
+                showAutoSaveStatus('error');
+                if (!isAutoSave) {
+                    const error = await response.json();
+                    showMessage(error.detail || '保存设置失败', true);
+                }
+            }
+        } catch (err) {
+            showAutoSaveStatus('error');
+            if (!isAutoSave) {
+                showMessage('网络错误，请重试。', true);
+            }
+        }
+    }
+
+    function showAutoSaveStatus(status) {
+        let indicator = document.getElementById('autoSaveIndicator');
+        if (!indicator) {
+            indicator = document.createElement('div');
+            indicator.id = 'autoSaveIndicator';
+            indicator.className = 'auto-save-indicator';
+            document.body.appendChild(indicator);
+        }
+        
+        if (status === 'saving') {
+            indicator.textContent = '⏳ 正在保存...';
+            indicator.className = 'auto-save-indicator saving';
+        } else if (status === 'saved') {
+            indicator.textContent = '✅ 已自动保存';
+            indicator.className = 'auto-save-indicator saved';
+            setTimeout(() => indicator.className = 'auto-save-indicator hidden', 2000);
+        } else if (status === 'error') {
+            indicator.textContent = '❌ 保存失败';
+            indicator.className = 'auto-save-indicator error';
+            setTimeout(() => indicator.className = 'auto-save-indicator hidden', 3000);
+        }
+    }
+
+    loadSettings();
+    enableAutoSave();
+</script>
+
+<style>
+    .test-result {
+        margin-left: 15px;
+        font-size: 14px;
+        padding: 5px 10px;
+        border-radius: 4px;
+    }
+    .test-result.testing {
+        color: #666;
+    }
+    .test-result.success {
+        color: #155724;
+        background: #d4edda;
+    }
+    .test-result.error {
+        color: #721c24;
+        background: #f8d7da;
+    }
+    .auto-save-indicator {
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        padding: 10px 20px;
+        border-radius: 8px;
+        font-size: 14px;
+        z-index: 1000;
+        transition: opacity 0.3s, transform 0.3s;
+    }
+    .auto-save-indicator.saving {
+        background: #fff3cd;
+        color: #856404;
+    }
+    .auto-save-indicator.saved {
+        background: #d4edda;
+        color: #155724;
+    }
+    .auto-save-indicator.error {
+        background: #f8d7da;
+        color: #721c24;
+    }
+    .auto-save-indicator.hidden {
+        opacity: 0;
+        transform: translateY(10px);
+        pointer-events: none;
+    }
+</style>
+{% endblock %}
+
+

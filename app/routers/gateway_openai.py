@@ -1,0 +1,705 @@
+"""
+PicGate OpenAI-Compatible Gateway API
+Exposes /v1/* endpoints for OpenWebUI integration.
+
+Phase C Implementation:
+- /v1/images/generations - Text to image
+- /v1/images/edits - Image editing (img2img) with URL→base64 conversion
+- /v1/chat/completions - Multi-turn chat with image URL→base64 conversion
+"""
+
+import time
+import logging
+from typing import Optional, Any, Dict, List
+from fastapi import APIRouter, Request, Depends, HTTPException, Header
+from fastapi.responses import JSONResponse
+from sqlalchemy.ext.asyncio import AsyncSession
+from pydantic import BaseModel
+import httpx
+
+from app.db import get_db
+from app.services.settings_service import get_settings
+from app.services.upstream_client import UpstreamClient
+from app.services.image_store import ImageStore, is_base64_image
+from app.services.url_builder import get_public_base_url, build_image_url
+from app.services.payload_rewriter import PayloadRewriter, create_rewriter
+from app.routers.admin_api import add_log
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/v1", tags=["OpenAI Gateway"])
+
+
+# --- Request/Response Models ---
+
+class ModelInfo(BaseModel):
+    id: str
+    object: str = "model"
+    created: int = 0
+    owned_by: str = "picgate"
+
+
+class ModelsResponse(BaseModel):
+    object: str = "list"
+    data: list[ModelInfo]
+
+
+class ErrorDetail(BaseModel):
+    message: str
+    type: str = "invalid_request_error"
+    code: Optional[str] = None
+
+
+class ErrorResponse(BaseModel):
+    error: ErrorDetail
+
+
+class ImageGenerationRequest(BaseModel):
+    prompt: str
+    model: Optional[str] = None
+    n: Optional[int] = 1
+    size: Optional[str] = "1024x1024"
+    quality: Optional[str] = "standard"
+    style: Optional[str] = "vivid"
+    response_format: Optional[str] = "url"  # We always return URL, ignore b64_json
+    
+
+# --- Authentication Dependency ---
+
+async def verify_gateway_auth(
+    authorization: Optional[str] = Header(None),
+    db: AsyncSession = Depends(get_db)
+) -> bool:
+    """
+    Verify the gateway API key from Authorization header.
+    Expected format: Bearer {gateway_api_key}
+    """
+    settings = await get_settings(db)
+    
+    if not settings.gateway_api_key:
+        # No API key configured - allow access (for initial setup)
+        logger.warning("Gateway API key not configured - requests are unauthenticated!")
+        return True
+    
+    if not authorization:
+        raise HTTPException(
+            status_code=401,
+            detail={"error": {"message": "Missing Authorization header", "type": "auth_error"}}
+        )
+    
+    # Parse Bearer token
+    parts = authorization.split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(
+            status_code=401,
+            detail={"error": {"message": "Invalid Authorization header format. Expected: Bearer <token>", "type": "auth_error"}}
+        )
+    
+    token = parts[1]
+    if token != settings.gateway_api_key:
+        raise HTTPException(
+            status_code=401,
+            detail={"error": {"message": "Invalid API key", "type": "auth_error"}}
+        )
+    
+    return True
+
+
+def create_error_response(message: str, error_type: str = "api_error", status_code: int = 500) -> JSONResponse:
+    """Create a standardized OpenAI-style error response."""
+    return JSONResponse(
+        status_code=status_code,
+        content={"error": {"message": message, "type": error_type}}
+    )
+
+
+# --- Endpoints ---
+
+@router.get("/models", response_model=ModelsResponse)
+async def list_models(
+    db: AsyncSession = Depends(get_db),
+    _auth: bool = Depends(verify_gateway_auth)
+):
+    """
+    List available models.
+    Returns the gateway model name configured in settings.
+    """
+    settings = await get_settings(db)
+    
+    model_name = settings.gateway_model_name or "picgate"
+    
+    return ModelsResponse(
+        data=[
+            ModelInfo(
+                id=model_name,
+                created=int(time.time())
+            )
+        ]
+    )
+
+
+@router.post("/images/generations")
+async def create_image(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    _auth: bool = Depends(verify_gateway_auth)
+):
+    """
+    Generate images from text prompt.
+    
+    Flow:
+    1. Receive request from OpenWebUI
+    2. Forward to upstream with b64_json format
+    3. Save base64 images to local storage
+    4. Return URLs pointing to our /images/{id} endpoint
+    """
+    settings = await get_settings(db)
+    
+    # Validate upstream configuration
+    if not settings.upstream_api_base or not settings.upstream_api_key:
+        return create_error_response(
+            "Upstream API not configured. Please configure in admin settings.",
+            "configuration_error",
+            503
+        )
+    
+    # Parse request body
+    try:
+        body = await request.json()
+    except Exception as e:
+        return create_error_response(f"Invalid JSON body: {e}", "invalid_request", 400)
+    
+    prompt = body.get("prompt")
+    if not prompt:
+        return create_error_response("Missing required field: prompt", "invalid_request", 400)
+    
+    # Get parameters with defaults
+    n = body.get("n", 1)
+    size = body.get("size", "1024x1024")
+    quality = body.get("quality", "standard")
+    style = body.get("style", "vivid")
+    
+    # Create upstream client
+    client = UpstreamClient(
+        api_base=settings.upstream_api_base,
+        api_key=settings.upstream_api_key
+    )
+    
+    add_log("INFO", f"📤 发起文生图请求: prompt={prompt[:50]}...")
+    
+    try:
+        # Call upstream API (always requests b64_json)
+        upstream_response = await client.generate_image(
+            prompt=prompt,
+            model=settings.upstream_model_name or "dall-e-3",
+            n=n,
+            size=size,
+            quality=quality,
+            style=style
+        )
+        add_log("INFO", f"📥 上游返回成功: 收到 {len(upstream_response.get('data', []))} 张图片")
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Upstream API error: {e}")
+        add_log("ERROR", f"❌ 上游返回错误: HTTP {e.response.status_code}")
+        return create_error_response(
+            f"Upstream API returned error: {e.response.status_code}",
+            "upstream_error",
+            502
+        )
+    except httpx.RequestError as e:
+        logger.error(f"Upstream connection error: {e}")
+        add_log("ERROR", f"❌ 上游连接失败: {str(e)[:50]}")
+        return create_error_response(
+            "Failed to connect to upstream API",
+            "connection_error",
+            502
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error calling upstream: {e}")
+        add_log("ERROR", f"❌ 请求异常: {str(e)[:50]}")
+        return create_error_response(
+            "Internal error processing request",
+            "internal_error",
+            500
+        )
+    
+    # Process response - save images and build URLs
+    image_store = ImageStore(db)
+    result_data = []
+    
+    for item in upstream_response.get("data", []):
+        b64_data = item.get("b64_json")
+        if not b64_data:
+            logger.warning("Upstream response missing b64_json data")
+            continue
+        
+        try:
+            # Save to local storage
+            image = await image_store.save_from_base64(b64_data)
+            
+            # Build public URL
+            image_url = await build_image_url(request, db, image.image_id)
+            
+            result_data.append({
+                "url": image_url,
+                "revised_prompt": item.get("revised_prompt")  # Pass through if present
+            })
+            
+            logger.info(f"Generated image {image.image_id}, URL: {image_url}")
+            add_log("INFO", f"文生图完成: {image.image_id[:8]}...")
+            
+        except Exception as e:
+            logger.error(f"Failed to save image: {e}")
+            continue
+    
+    if not result_data:
+        return create_error_response(
+            "No images were generated successfully",
+            "generation_error",
+            500
+        )
+    
+    # Return OpenAI-compatible response
+    return {
+        "created": int(time.time()),
+        "data": result_data
+    }
+
+
+@router.post("/images/edits")
+async def edit_image(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    _auth: bool = Depends(verify_gateway_auth)
+):
+    """
+    Edit/modify existing images (img2img).
+    
+    Flow:
+    1. Receive request with image (and optional mask) - can be URL or base64
+    2. Use PayloadRewriter to convert any URLs to base64
+    3. Forward to upstream API
+    4. Save returned images and return URLs
+    
+    Supports:
+    - image: Base64 or URL of the image to edit
+    - mask: Optional base64 or URL of the mask
+    - prompt: Edit instructions
+    - n, size: Standard generation parameters
+    """
+    settings = await get_settings(db)
+    
+    # Validate upstream configuration
+    if not settings.upstream_api_base or not settings.upstream_api_key:
+        return create_error_response(
+            "Upstream API not configured. Please configure in admin settings.",
+            "configuration_error",
+            503
+        )
+    
+    # Parse request body
+    try:
+        body = await request.json()
+    except Exception as e:
+        return create_error_response(f"Invalid JSON body: {e}", "invalid_request", 400)
+    
+    # Validate required fields
+    if not body.get("image"):
+        return create_error_response("Missing required field: image", "invalid_request", 400)
+    if not body.get("prompt"):
+        return create_error_response("Missing required field: prompt", "invalid_request", 400)
+    
+    # Create payload rewriter to convert URLs to base64
+    rewriter = await create_rewriter(db, settings)
+    
+    try:
+        # Rewrite the entire body - converts image/mask URLs to base64
+        rewritten_body = await rewriter.rewrite(body)
+    except ValueError as e:
+        # External image fetch not allowed
+        return create_error_response(str(e), "security_error", 400)
+    except Exception as e:
+        logger.error(f"Payload rewriting failed: {e}")
+        return create_error_response(
+            f"Failed to process image URLs: {e}",
+            "processing_error",
+            400
+        )
+    
+    # Extract parameters
+    image_base64 = rewritten_body.get("image")
+    mask_base64 = rewritten_body.get("mask")
+    prompt = rewritten_body.get("prompt")
+    n = rewritten_body.get("n", 1)
+    size = rewritten_body.get("size", "1024x1024")
+    
+    # Strip data URL prefix if present (upstream expects raw base64)
+    if image_base64 and image_base64.startswith("data:"):
+        image_base64 = image_base64.split(",", 1)[1] if "," in image_base64 else image_base64
+    if mask_base64 and mask_base64.startswith("data:"):
+        mask_base64 = mask_base64.split(",", 1)[1] if "," in mask_base64 else mask_base64
+    
+    # Create upstream client
+    client = UpstreamClient(
+        api_base=settings.upstream_api_base,
+        api_key=settings.upstream_api_key
+    )
+    
+    try:
+        # Call upstream API for image editing
+        upstream_response = await client.edit_image(
+            image_base64=image_base64,
+            prompt=prompt,
+            model=settings.upstream_model_name or "dall-e-2",
+            mask_base64=mask_base64,
+            n=n,
+            size=size
+        )
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Upstream API error: {e}")
+        # Try to extract error message from response
+        try:
+            error_detail = e.response.json().get("error", {}).get("message", str(e))
+        except Exception:
+            error_detail = str(e.response.status_code)
+        return create_error_response(
+            f"Upstream API error: {error_detail}",
+            "upstream_error",
+            502
+        )
+    except httpx.RequestError as e:
+        logger.error(f"Upstream connection error: {e}")
+        return create_error_response(
+            "Failed to connect to upstream API",
+            "connection_error",
+            502
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error calling upstream: {e}")
+        return create_error_response(
+            "Internal error processing request",
+            "internal_error",
+            500
+        )
+    
+    # Process response - save images and build URLs
+    image_store = ImageStore(db)
+    result_data = []
+    
+    for item in upstream_response.get("data", []):
+        b64_data = item.get("b64_json")
+        if not b64_data:
+            logger.warning("Upstream response missing b64_json data")
+            continue
+        
+        try:
+            # Save to local storage
+            image = await image_store.save_from_base64(b64_data)
+            
+            # Build public URL
+            image_url = await build_image_url(request, db, image.image_id)
+            
+            result_data.append({
+                "url": image_url,
+                "revised_prompt": item.get("revised_prompt")
+            })
+            
+            logger.info(f"Edited image saved as {image.image_id}, URL: {image_url}")
+            
+        except Exception as e:
+            logger.error(f"Failed to save edited image: {e}")
+            continue
+    
+    if not result_data:
+        return create_error_response(
+            "No images were generated successfully",
+            "generation_error",
+            500
+        )
+    
+    # Return OpenAI-compatible response
+    return {
+        "created": int(time.time()),
+        "data": result_data
+    }
+
+
+@router.post("/chat/completions")
+async def chat_completions(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    _auth: bool = Depends(verify_gateway_auth)
+):
+    """
+    Chat completions with image support (non-streaming).
+    
+    CRITICAL: This endpoint handles multi-turn conversations where images
+    may be referenced by URL in the messages. Before forwarding to upstream,
+    all image URLs must be converted to base64.
+    
+    Flow:
+    1. Receive chat completion request with messages
+    2. Use PayloadRewriter to convert ALL image URLs to base64
+    3. Forward to upstream API
+    4. Process response:
+       - If response contains images (base64), save them and return URLs
+       - If response is text, pass through as-is
+    """
+    settings = await get_settings(db)
+    
+    # Validate upstream configuration
+    if not settings.upstream_api_base or not settings.upstream_api_key:
+        return create_error_response(
+            "Upstream API not configured. Please configure in admin settings.",
+            "configuration_error",
+            503
+        )
+    
+    # Parse request body
+    try:
+        body = await request.json()
+    except Exception as e:
+        return create_error_response(f"Invalid JSON body: {e}", "invalid_request", 400)
+    
+    # Validate required fields
+    if not body.get("messages"):
+        return create_error_response("Missing required field: messages", "invalid_request", 400)
+    
+    # Create payload rewriter to convert URLs to base64
+    rewriter = await create_rewriter(db, settings)
+    
+    try:
+        # Rewrite the entire body - deep traversal converts all image URLs to base64
+        # This handles:
+        # - messages[].content[].image_url.url
+        # - messages[].content[].input_image.url
+        # - tool_calls/function_call arguments
+        # - Any nested image/init_image/mask fields
+        rewritten_body = await rewriter.rewrite(body)
+    except ValueError as e:
+        # External image fetch not allowed
+        return create_error_response(str(e), "security_error", 400)
+    except Exception as e:
+        logger.error(f"Payload rewriting failed: {e}")
+        return create_error_response(
+            f"Failed to process image URLs in messages: {e}",
+            "processing_error",
+            400
+        )
+    
+    # Ensure we're using non-streaming mode
+    rewritten_body["stream"] = False
+    
+    # Map model name: replace gateway model with upstream model
+    if rewritten_body.get("model") == settings.gateway_model_name:
+        rewritten_body["model"] = settings.upstream_model_name or rewritten_body.get("model")
+    
+    # Create upstream client
+    client = UpstreamClient(
+        api_base=settings.upstream_api_base,
+        api_key=settings.upstream_api_key
+    )
+    
+    msg_count = len(rewritten_body.get("messages", []))
+    add_log("INFO", f"📤 发起对话请求: {msg_count} 条消息")
+    
+    try:
+        # Call upstream API for chat completions
+        upstream_response = await client.chat_completions(
+            messages=rewritten_body.get("messages", []),
+            model=rewritten_body.get("model", settings.upstream_model_name or "gpt-4-vision-preview"),
+            **{k: v for k, v in rewritten_body.items() if k not in ("messages", "model", "stream")}
+        )
+        add_log("INFO", f"📥 上游对话返回成功")
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Upstream API error: {e}")
+        # Try to extract error message
+        try:
+            error_detail = e.response.json().get("error", {}).get("message", str(e))
+        except Exception:
+            error_detail = str(e.response.status_code)
+        add_log("ERROR", f"❌ 上游对话错误: {error_detail[:50]}")
+        return create_error_response(
+            f"Upstream API error: {error_detail}",
+            "upstream_error",
+            502
+        )
+    except httpx.RequestError as e:
+        logger.error(f"Upstream connection error: {e}")
+        return create_error_response(
+            "Failed to connect to upstream API",
+            "connection_error",
+            502
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error calling upstream: {e}")
+        return create_error_response(
+            "Internal error processing request",
+            "internal_error",
+            500
+        )
+    
+    # Process response - check if any images need to be saved
+    # Some models return images in the response as base64
+    image_store = ImageStore(db)
+    
+    try:
+        processed_response = await _process_chat_response(
+            upstream_response, 
+            image_store, 
+            request, 
+            db
+        )
+        return processed_response
+    except Exception as e:
+        logger.error(f"Error processing chat response: {e}")
+        # Return original response if processing fails
+        return upstream_response
+
+
+async def _process_chat_response(
+    response: Dict[str, Any],
+    image_store: ImageStore,
+    request: Request,
+    db: AsyncSession
+) -> Dict[str, Any]:
+    """
+    Process chat completion response, converting any base64 images to URLs.
+    
+    Handles multiple response formats:
+    1. content as array with type: "image"
+    2. content as string with base64 data URL (data:image/...)
+    3. content as array with image_url containing base64
+    4. Markdown image syntax with base64: ![...](data:image/...)
+    """
+    import re
+    
+    if not response.get("choices"):
+        return response
+    
+    for choice in response.get("choices", []):
+        message = choice.get("message", {})
+        content = message.get("content")
+        
+        if content is None:
+            continue
+        
+        # Handle content as string
+        if isinstance(content, str):
+            new_content = content
+            processed = False
+            
+            # First check for markdown image syntax with base64 (more specific pattern)
+            # ![alt](data:image/...)
+            md_pattern = r'!\[([^\]]*)\]\((data:image/[^;]+;base64,[A-Za-z0-9+/=]+)\)'
+            md_matches = list(re.finditer(md_pattern, new_content))
+            
+            if md_matches:
+                for match in reversed(md_matches):
+                    alt_text = match.group(1)
+                    data_url = match.group(2)
+                    b64_data = data_url.split(",", 1)[1]
+                    
+                    try:
+                        image = await image_store.save_from_base64(b64_data)
+                        image_url = await build_image_url(request, db, image.image_id)
+                        
+                        # Replace with URL in markdown
+                        new_md = f"![{alt_text}]({image_url})"
+                        new_content = new_content.replace(match.group(0), new_md)
+                        processed = True
+                        logger.info(f"Converted markdown base64 to URL: {image_url}")
+                        add_log("INFO", f"对话图片已保存: {image.image_id[:8]}...")
+                    except Exception as e:
+                        logger.error(f"Failed to save markdown base64 image: {e}")
+                
+                message["content"] = new_content
+            
+            # Only check for standalone base64 data URLs if no markdown was found
+            if not processed:
+                # Pattern: data:image/xxx;base64,xxxxx (not inside markdown)
+                base64_pattern = r'data:image/[^;]+;base64,([A-Za-z0-9+/=]+)'
+                matches = list(re.finditer(base64_pattern, new_content))
+                
+                if matches:
+                    for match in reversed(matches):  # Reverse to maintain positions
+                        b64_data = match.group(1)
+                        full_match = match.group(0)
+                        
+                        try:
+                            # Save image
+                            image = await image_store.save_from_base64(b64_data)
+                            image_url = await build_image_url(request, db, image.image_id)
+                            
+                            # Replace base64 with URL
+                            new_content = new_content.replace(full_match, image_url)
+                            logger.info(f"Converted base64 in text to URL: {image_url}")
+                        except Exception as e:
+                            logger.error(f"Failed to save base64 image from text: {e}")
+                    
+                    message["content"] = new_content
+        
+        # Handle content as array (multimodal response)
+        elif isinstance(content, list):
+            new_content = []
+            modified = False
+            
+            for item in content:
+                if not isinstance(item, dict):
+                    new_content.append(item)
+                    continue
+                
+                item_type = item.get("type")
+                
+                # Check for image data in response
+                if item_type == "image" and item.get("image"):
+                    image_data = item["image"]
+                    if is_base64_image(image_data):
+                        try:
+                            b64_data = image_data
+                            if b64_data.startswith("data:"):
+                                b64_data = b64_data.split(",", 1)[1]
+                            
+                            image = await image_store.save_from_base64(b64_data)
+                            image_url = await build_image_url(request, db, image.image_id)
+                            
+                            new_item = {
+                                "type": "image_url",
+                                "image_url": {"url": image_url}
+                            }
+                            new_content.append(new_item)
+                            modified = True
+                            logger.info(f"Converted response image to URL: {image_url}")
+                            continue
+                        except Exception as e:
+                            logger.error(f"Failed to save response image: {e}")
+                
+                # Check for image_url with base64 data
+                elif item_type == "image_url":
+                    image_url_obj = item.get("image_url", {})
+                    url = image_url_obj.get("url", "")
+                    
+                    if url.startswith("data:image"):
+                        try:
+                            b64_data = url.split(",", 1)[1]
+                            image = await image_store.save_from_base64(b64_data)
+                            public_url = await build_image_url(request, db, image.image_id)
+                            
+                            new_item = {
+                                "type": "image_url",
+                                "image_url": {"url": public_url}
+                            }
+                            new_content.append(new_item)
+                            modified = True
+                            logger.info(f"Converted image_url base64 to URL: {public_url}")
+                            continue
+                        except Exception as e:
+                            logger.error(f"Failed to save image_url base64: {e}")
+                
+                new_content.append(item)
+            
+            if modified:
+                message["content"] = new_content
+    
+    return response
+

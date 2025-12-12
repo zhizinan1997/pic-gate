@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  picgate:
+    build: .
+    container_name: picgate
+    ports:
+      - "5643:5643"
+    volumes:
+      - picgate-data:/app/data
+    environment:
+      - HOST=0.0.0.0
+      - PORT=5643
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:5643/health').raise_for_status()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  picgate-data:
+    driver: local

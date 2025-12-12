@@ -1,0 +1,193 @@
+{% extends "base.html" %}
+
+{% block title %}日志 - PicGate 管理后台{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>系统日志</h1>
+    <p>查看 PicGate 运行日志</p>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2>操作</h2>
+    </div>
+    <div class="card-body">
+        <div class="action-buttons">
+            <button onclick="loadLogs()" class="btn btn-primary">
+                🔄 刷新日志
+            </button>
+            <button onclick="clearLogs()" class="btn btn-warning">
+                🗑️ 清除日志
+            </button>
+            <label class="checkbox-inline">
+                <input type="checkbox" id="autoRefresh" onchange="toggleAutoRefresh()">
+                自动刷新（每5秒）
+            </label>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2>日志内容</h2>
+        <span class="log-count" id="logCount">0 条记录</span>
+    </div>
+    <div class="card-body">
+        <div class="log-container" id="logContainer">
+            <div class="log-loading">加载中...</div>
+        </div>
+    </div>
+</div>
+
+<div id="message" class="message" style="display: none;"></div>
+
+<style>
+    .log-container {
+        background: #1e1e1e;
+        color: #d4d4d4;
+        font-family: 'Consolas', 'Monaco', monospace;
+        font-size: 13px;
+        line-height: 1.5;
+        padding: 15px;
+        border-radius: 8px;
+        max-height: 600px;
+        overflow-y: auto;
+        white-space: pre-wrap;
+        word-break: break-all;
+    }
+    .log-entry {
+        padding: 2px 0;
+        border-bottom: 1px solid #333;
+    }
+    .log-entry:last-child {
+        border-bottom: none;
+    }
+    .log-time {
+        color: #569cd6;
+    }
+    .log-level-info {
+        color: #4ec9b0;
+    }
+    .log-level-warning {
+        color: #dcdcaa;
+    }
+    .log-level-error {
+        color: #f14c4c;
+    }
+    .log-message {
+        color: #d4d4d4;
+    }
+    .log-loading {
+        color: #888;
+        text-align: center;
+        padding: 20px;
+    }
+    .log-count {
+        font-size: 14px;
+        color: #888;
+    }
+    .checkbox-inline {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        margin-left: 15px;
+        cursor: pointer;
+    }
+    .checkbox-inline input {
+        width: auto;
+        margin: 0;
+    }
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    let autoRefreshInterval = null;
+
+    async function loadLogs() {
+        try {
+            const response = await fetch('/admin/api/logs');
+            if (response.status === 401) {
+                window.location.href = '/admin/login';
+                return;
+            }
+            const data = await response.json();
+            
+            const container = document.getElementById('logContainer');
+            const countEl = document.getElementById('logCount');
+            
+            if (!data.logs || data.logs.length === 0) {
+                container.innerHTML = '<div class="log-loading">暂无日志</div>';
+                countEl.textContent = '0 条记录';
+                return;
+            }
+            
+            countEl.textContent = data.logs.length + ' 条记录';
+            
+            let html = '';
+            data.logs.forEach(log => {
+                let levelClass = 'log-level-info';
+                if (log.level === 'WARNING') levelClass = 'log-level-warning';
+                if (log.level === 'ERROR') levelClass = 'log-level-error';
+                
+                html += `<div class="log-entry">` +
+                    `<span class="log-time">${log.time}</span> ` +
+                    `<span class="${levelClass}">[${log.level}]</span> ` +
+                    `<span class="log-message">${escapeHtml(log.message)}</span>` +
+                    `</div>`;
+            });
+            
+            container.innerHTML = html;
+            container.scrollTop = container.scrollHeight;
+        } catch (err) {
+            console.error('加载日志失败:', err);
+            document.getElementById('logContainer').innerHTML = 
+                '<div class="log-loading">加载日志失败</div>';
+        }
+    }
+
+    async function clearLogs() {
+        if (!confirm('确定要清除所有日志吗？')) {
+            return;
+        }
+        
+        try {
+            const response = await fetch('/admin/api/logs', { method: 'DELETE' });
+            const data = await response.json();
+            showMessage(data.message);
+            loadLogs();
+        } catch (err) {
+            showMessage('清除日志失败', true);
+        }
+    }
+
+    function toggleAutoRefresh() {
+        const checked = document.getElementById('autoRefresh').checked;
+        if (checked) {
+            autoRefreshInterval = setInterval(loadLogs, 5000);
+        } else {
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+                autoRefreshInterval = null;
+            }
+        }
+    }
+
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    function showMessage(msg, isError = false) {
+        const messageDiv = document.getElementById('message');
+        messageDiv.textContent = msg;
+        messageDiv.className = 'message ' + (isError ? 'error' : 'success');
+        messageDiv.style.display = 'block';
+        setTimeout(() => messageDiv.style.display = 'none', 5000);
+    }
+
+    loadLogs();
+</script>
+{% endblock %}

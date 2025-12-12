@@ -1,0 +1,480 @@
+{% extends "base.html" %}
+
+{% block title %}图片预览 - PicGate 管理后台{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>本地图片预览</h1>
+    <p>查看和管理缓存的图片</p>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2>图片列表</h2>
+        <span class="image-count" id="imageCount">加载中...</span>
+    </div>
+    <div class="card-body">
+        <div class="toolbar">
+            <div class="toolbar-left">
+                <button onclick="loadImages()" class="btn btn-primary">🔄 刷新</button>
+                <select id="sortBy" onchange="loadImages()">
+                    <option value="created_desc">创建时间（最新）</option>
+                    <option value="created_asc">创建时间（最早）</option>
+                    <option value="accessed_desc">访问时间（最新）</option>
+                    <option value="size_desc">文件大小（最大）</option>
+                </select>
+                <label class="select-all-label">
+                    <input type="checkbox" id="selectAll" onchange="toggleSelectAll()">
+                    全选
+                </label>
+            </div>
+            <div class="toolbar-right">
+                <span id="selectedCount" class="selected-count"></span>
+                <button onclick="deleteSelectedLocal()" class="btn btn-warning" id="btnDeleteLocal" disabled>
+                    🗑️ 删除本地
+                </button>
+                <button onclick="deleteSelectedR2()" class="btn btn-danger" id="btnDeleteR2" disabled>
+                    ☁️ 删除 R2
+                </button>
+                <button onclick="deleteSelectedAll()" class="btn btn-danger" id="btnDeleteAll" disabled>
+                    ❌ 全部删除
+                </button>
+            </div>
+        </div>
+        
+        <div class="image-grid" id="imageGrid">
+            <div class="loading">加载中...</div>
+        </div>
+        
+        <div class="pagination" id="pagination"></div>
+    </div>
+</div>
+
+<!-- Image Preview Modal -->
+<div id="imageModal" class="modal" onclick="closeModal(event)">
+    <div class="modal-content" onclick="event.stopPropagation()">
+        <span class="modal-close" onclick="closeModal()">&times;</span>
+        <img id="modalImage" src="" alt="预览">
+        <div class="modal-info" id="modalInfo"></div>
+        <div class="modal-actions">
+            <button onclick="deleteFromModal('local')" class="btn btn-warning btn-sm">🗑️ 删除本地</button>
+            <button onclick="deleteFromModal('r2')" class="btn btn-danger btn-sm">☁️ 删除 R2</button>
+            <button onclick="deleteFromModal('all')" class="btn btn-danger btn-sm">❌ 全部删除</button>
+        </div>
+    </div>
+</div>
+
+<div id="message" class="message" style="display: none;"></div>
+
+<style>
+    .toolbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-bottom: 15px;
+        padding: 10px;
+        background: #f8f9fa;
+        border-radius: 8px;
+    }
+    .toolbar-left, .toolbar-right {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+    }
+    .toolbar select {
+        padding: 8px 12px;
+        border-radius: 6px;
+        border: 1px solid #ccc;
+        background: #fff;
+        color: #333;
+        cursor: pointer;
+        font-size: 14px;
+    }
+    .toolbar select option {
+        background: #fff;
+        color: #333;
+    }
+    .select-all-label {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        cursor: pointer;
+        font-size: 14px;
+    }
+    .select-all-label input {
+        width: auto;
+        margin: 0;
+    }
+    .selected-count {
+        font-size: 14px;
+        color: #666;
+        margin-right: 10px;
+    }
+    .image-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+        gap: 15px;
+    }
+    .image-card {
+        position: relative;
+        background: #f5f5f5;
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        transition: transform 0.2s, box-shadow 0.2s;
+    }
+    .image-card:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    }
+    .image-card.selected {
+        outline: 3px solid #007bff;
+    }
+    .image-checkbox {
+        position: absolute;
+        top: 8px;
+        left: 8px;
+        width: 20px;
+        height: 20px;
+        cursor: pointer;
+        z-index: 10;
+    }
+    .image-thumb-container {
+        cursor: pointer;
+    }
+    .image-thumb {
+        width: 100%;
+        height: 140px;
+        object-fit: cover;
+        background: #ddd;
+    }
+    .image-info {
+        padding: 8px;
+        font-size: 11px;
+    }
+    .image-id {
+        font-family: monospace;
+        color: #666;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .image-meta {
+        color: #888;
+        margin-top: 3px;
+    }
+    .image-badges {
+        display: flex;
+        gap: 5px;
+        margin-top: 5px;
+    }
+    .badge {
+        font-size: 9px;
+        padding: 2px 5px;
+        border-radius: 8px;
+        color: white;
+    }
+    .badge-local { background: #4caf50; }
+    .badge-r2 { background: #2196f3; }
+    .loading, .no-images {
+        text-align: center;
+        padding: 40px;
+        color: #888;
+        grid-column: 1 / -1;
+    }
+    .pagination {
+        display: flex;
+        justify-content: center;
+        gap: 10px;
+        margin-top: 20px;
+    }
+    .page-btn {
+        padding: 8px 15px;
+        border: 1px solid #ddd;
+        background: white;
+        border-radius: 6px;
+        cursor: pointer;
+    }
+    .page-btn:hover { background: #f5f5f5; }
+    .page-btn.active {
+        background: #007bff;
+        color: white;
+        border-color: #007bff;
+    }
+    .image-count {
+        font-size: 14px;
+        color: #888;
+    }
+    
+    /* Modal */
+    .modal {
+        display: none;
+        position: fixed;
+        z-index: 1000;
+        left: 0; top: 0;
+        width: 100%; height: 100%;
+        background-color: rgba(0,0,0,0.9);
+        justify-content: center;
+        align-items: center;
+    }
+    .modal.show { display: flex; }
+    .modal-content {
+        position: relative;
+        max-width: 90%;
+        max-height: 90%;
+        text-align: center;
+    }
+    .modal-content img {
+        max-width: 100%;
+        max-height: 70vh;
+        border-radius: 8px;
+    }
+    .modal-close {
+        position: absolute;
+        top: -35px;
+        right: 0;
+        color: white;
+        font-size: 30px;
+        cursor: pointer;
+    }
+    .modal-info {
+        color: white;
+        text-align: center;
+        padding: 10px;
+        font-size: 13px;
+    }
+    .modal-actions {
+        display: flex;
+        justify-content: center;
+        gap: 10px;
+        margin-top: 10px;
+    }
+    .btn-sm {
+        padding: 6px 12px;
+        font-size: 12px;
+    }
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    let currentPage = 1;
+    const pageSize = 24;
+    let selectedImages = new Set();
+    let currentModalImageId = null;
+    let imagesData = [];
+
+    async function loadImages() {
+        const sortBy = document.getElementById('sortBy').value;
+        
+        try {
+            const response = await fetch(`/admin/api/images?page=${currentPage}&size=${pageSize}&sort=${sortBy}`);
+            if (response.status === 401) {
+                window.location.href = '/admin/login';
+                return;
+            }
+            const data = await response.json();
+            imagesData = data.images || [];
+            
+            const grid = document.getElementById('imageGrid');
+            const countEl = document.getElementById('imageCount');
+            
+            countEl.textContent = `共 ${data.total} 张图片`;
+            selectedImages.clear();
+            updateSelectedCount();
+            document.getElementById('selectAll').checked = false;
+            
+            if (!imagesData.length) {
+                grid.innerHTML = '<div class="no-images">暂无图片</div>';
+                document.getElementById('pagination').innerHTML = '';
+                return;
+            }
+            
+            let html = '';
+            imagesData.forEach(img => {
+                const size = formatBytes(img.size_bytes);
+                const created = formatDate(img.created_at);
+                
+                html += `
+                    <div class="image-card" id="card-${img.image_id}" data-id="${img.image_id}">
+                        <input type="checkbox" class="image-checkbox" 
+                               onchange="toggleSelect('${img.image_id}')"
+                               id="check-${img.image_id}">
+                        <div class="image-thumb-container" onclick="showImage('${img.image_id}', '${img.content_type}', ${img.size_bytes}, '${img.created_at}', ${img.has_local_copy}, ${img.has_r2_copy})">
+                            <img class="image-thumb" src="/images/${img.image_id}" alt="${img.image_id}" loading="lazy"
+                                 onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2260%22>🖼️</text></svg>'">
+                        </div>
+                        <div class="image-info">
+                            <div class="image-id" title="${img.image_id}">${img.image_id.substring(0, 8)}...</div>
+                            <div class="image-meta">${size} · ${created}</div>
+                            <div class="image-badges">
+                                ${img.has_local_copy ? '<span class="badge badge-local">本地</span>' : ''}
+                                ${img.has_r2_copy ? '<span class="badge badge-r2">R2</span>' : ''}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            });
+            
+            grid.innerHTML = html;
+            renderPagination(data.total, data.page, data.pages);
+            
+        } catch (err) {
+            console.error('加载图片失败:', err);
+            document.getElementById('imageGrid').innerHTML = '<div class="no-images">加载图片失败</div>';
+        }
+    }
+
+    function toggleSelect(imageId) {
+        const checkbox = document.getElementById(`check-${imageId}`);
+        const card = document.getElementById(`card-${imageId}`);
+        
+        if (checkbox.checked) {
+            selectedImages.add(imageId);
+            card.classList.add('selected');
+        } else {
+            selectedImages.delete(imageId);
+            card.classList.remove('selected');
+        }
+        updateSelectedCount();
+    }
+
+    function toggleSelectAll() {
+        const selectAll = document.getElementById('selectAll').checked;
+        
+        imagesData.forEach(img => {
+            const checkbox = document.getElementById(`check-${img.image_id}`);
+            const card = document.getElementById(`card-${img.image_id}`);
+            
+            if (checkbox) {
+                checkbox.checked = selectAll;
+                if (selectAll) {
+                    selectedImages.add(img.image_id);
+                    card.classList.add('selected');
+                } else {
+                    selectedImages.delete(img.image_id);
+                    card.classList.remove('selected');
+                }
+            }
+        });
+        updateSelectedCount();
+    }
+
+    function updateSelectedCount() {
+        const count = selectedImages.size;
+        document.getElementById('selectedCount').textContent = count > 0 ? `已选择 ${count} 张` : '';
+        document.getElementById('btnDeleteLocal').disabled = count === 0;
+        document.getElementById('btnDeleteR2').disabled = count === 0;
+        document.getElementById('btnDeleteAll').disabled = count === 0;
+    }
+
+    async function deleteSelectedLocal() {
+        if (!confirm(`确定删除 ${selectedImages.size} 张图片的本地缓存？`)) return;
+        await deleteImages(Array.from(selectedImages), 'local');
+    }
+
+    async function deleteSelectedR2() {
+        if (!confirm(`确定删除 ${selectedImages.size} 张图片的 R2 存储？此操作不可恢复！`)) return;
+        await deleteImages(Array.from(selectedImages), 'r2');
+    }
+
+    async function deleteSelectedAll() {
+        if (!confirm(`确定完全删除 ${selectedImages.size} 张图片（本地+R2+元数据）？此操作不可恢复！`)) return;
+        await deleteImages(Array.from(selectedImages), 'all');
+    }
+
+    async function deleteFromModal(type) {
+        if (!currentModalImageId) return;
+        const typeText = type === 'local' ? '本地缓存' : type === 'r2' ? 'R2 存储' : '全部数据';
+        if (!confirm(`确定删除此图片的${typeText}？`)) return;
+        
+        await deleteImages([currentModalImageId], type);
+        closeModal();
+    }
+
+    async function deleteImages(imageIds, type) {
+        try {
+            const response = await fetch('/admin/api/images/batch-delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ image_ids: imageIds, delete_type: type })
+            });
+            const data = await response.json();
+            showMessage(data.message, !data.success);
+            loadImages();
+        } catch (err) {
+            showMessage('删除失败', true);
+        }
+    }
+
+    function renderPagination(total, current, pages) {
+        const pagination = document.getElementById('pagination');
+        if (pages <= 1) { pagination.innerHTML = ''; return; }
+        
+        let html = '';
+        if (current > 1) html += `<button class="page-btn" onclick="goToPage(${current - 1})">上一页</button>`;
+        
+        for (let i = 1; i <= pages; i++) {
+            if (i === current) {
+                html += `<button class="page-btn active">${i}</button>`;
+            } else if (i === 1 || i === pages || (i >= current - 2 && i <= current + 2)) {
+                html += `<button class="page-btn" onclick="goToPage(${i})">${i}</button>`;
+            } else if (i === current - 3 || i === current + 3) {
+                html += `<span>...</span>`;
+            }
+        }
+        
+        if (current < pages) html += `<button class="page-btn" onclick="goToPage(${current + 1})">下一页</button>`;
+        pagination.innerHTML = html;
+    }
+
+    function goToPage(page) { currentPage = page; loadImages(); }
+
+    function showImage(imageId, contentType, size, createdAt, hasLocal, hasR2) {
+        currentModalImageId = imageId;
+        const modal = document.getElementById('imageModal');
+        document.getElementById('modalImage').src = `/images/${imageId}`;
+        document.getElementById('modalInfo').innerHTML = `
+            <strong>ID:</strong> ${imageId}<br>
+            <strong>类型:</strong> ${contentType} | <strong>大小:</strong> ${formatBytes(size)}<br>
+            <strong>创建时间:</strong> ${formatDate(createdAt)}<br>
+            <strong>存储:</strong> ${hasLocal ? '✅ 本地' : '❌ 本地'} | ${hasR2 ? '✅ R2' : '❌ R2'}
+        `;
+        modal.classList.add('show');
+    }
+
+    function closeModal(event) {
+        if (!event || event.target.id === 'imageModal') {
+            document.getElementById('imageModal').classList.remove('show');
+            currentModalImageId = null;
+        }
+    }
+
+    function formatBytes(bytes) {
+        if (bytes === 0) return '0 B';
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+    }
+
+    function formatDate(dateStr) {
+        const date = new Date(dateStr);
+        return date.toLocaleDateString('zh-CN') + ' ' + date.toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'});
+    }
+
+    function showMessage(msg, isError = false) {
+        const div = document.getElementById('message');
+        div.textContent = msg;
+        div.className = 'message ' + (isError ? 'error' : 'success');
+        div.style.display = 'block';
+        setTimeout(() => div.style.display = 'none', 5000);
+    }
+
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+    loadImages();
+</script>
+{% endblock %}

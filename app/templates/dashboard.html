@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+
+{% block title %}仪表盘 - PicGate 管理后台{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>仪表盘</h1>
+    <p>PicGate 绘图网关概览</p>
+</div>
+
+<div class="stats-grid" id="statsGrid">
+    <div class="stat-card">
+        <div class="stat-icon">🖼️</div>
+        <div class="stat-content">
+            <div class="stat-value" id="totalImages">-</div>
+            <div class="stat-label">图片总数</div>
+        </div>
+    </div>
+    
+    <div class="stat-card">
+        <div class="stat-icon">💾</div>
+        <div class="stat-content">
+            <div class="stat-value" id="localImages">-</div>
+            <div class="stat-label">本地缓存</div>
+        </div>
+    </div>
+    
+    <div class="stat-card">
+        <div class="stat-icon">☁️</div>
+        <div class="stat-content">
+            <div class="stat-value" id="r2Images">-</div>
+            <div class="stat-label">R2 存储</div>
+        </div>
+    </div>
+    
+    <div class="stat-card">
+        <div class="stat-icon">📦</div>
+        <div class="stat-content">
+            <div class="stat-value" id="diskUsage">-</div>
+            <div class="stat-label">磁盘占用</div>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2>上传状态</h2>
+    </div>
+    <div class="card-body">
+        <div class="status-row">
+            <span class="status-label">等待上传：</span>
+            <span class="status-value" id="pendingUploads">-</span>
+        </div>
+        <div class="status-row">
+            <span class="status-label">上传失败：</span>
+            <span class="status-value" id="failedUploads">-</span>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2>快捷操作</h2>
+    </div>
+    <div class="card-body">
+        <div class="action-buttons">
+            <a href="/admin/settings" class="btn btn-primary">配置设置</a>
+            <a href="/admin/cache" class="btn btn-secondary">缓存管理</a>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    async function loadStats() {
+        try {
+            const response = await fetch('/admin/api/stats');
+            if (response.status === 401) {
+                window.location.href = '/admin/login';
+                return;
+            }
+            const stats = await response.json();
+            
+            document.getElementById('totalImages').textContent = stats.total_images;
+            document.getElementById('localImages').textContent = stats.local_images;
+            document.getElementById('r2Images').textContent = stats.r2_images;
+            document.getElementById('diskUsage').textContent = stats.disk_usage_mb + ' MB';
+            document.getElementById('pendingUploads').textContent = stats.pending_uploads;
+            document.getElementById('failedUploads').textContent = stats.failed_uploads;
+        } catch (err) {
+            console.error('加载统计信息失败:', err);
+        }
+    }
+
+    loadStats();
+    setInterval(loadStats, 30000); // 每30秒刷新
+</script>
+{% endblock %}
