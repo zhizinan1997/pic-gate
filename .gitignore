@@ -45,6 +45,10 @@ data/
 *.jpeg
 *.webp
 *.gif
+# Allow README screenshots
+!docs/
+!docs/screenshots/
+!docs/screenshots/*
 
 # Environment
 .env
