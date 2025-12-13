@@ -13,7 +13,7 @@ import re
 import httpx
 import logging
 import base64
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Optional, Set, Union
 from copy import deepcopy
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -97,7 +97,10 @@ class PayloadRewriter:
                 elif isinstance(value, list):
                     result[key] = await self._rewrite_content_array(value)
                 elif isinstance(value, str):
-                    result[key] = await self._rewrite_string_content(value)
+                    # CRITICAL FIX: Convert string with markdown images to structured format
+                    # This ensures models like Gemini recognize images as images, not text
+                    structured_content = await self._convert_string_to_structured_content(value)
+                    result[key] = structured_content
                 else:
                     # Unexpected type, pass through
                     result[key] = value
@@ -119,6 +122,99 @@ class PayloadRewriter:
     async def _rewrite_list(self, lst: list) -> list:
         """Rewrite a list."""
         return [await self._rewrite_value(item) for item in lst]
+    
+    async def _convert_string_to_structured_content(self, content: str) -> Union[str, list]:
+        """
+        Convert string content with markdown images to structured content array.
+        
+        CRITICAL: This is the key fix for the token overflow issue.
+        
+        Problem: When assistant returns "![image](url)", and we replace url with base64,
+        models like Gemini treat the entire base64 string as TEXT tokens (131k+ tokens!).
+        
+        Solution: Convert markdown images to structured format:
+        - "Here is ![image](url) for you" becomes:
+        - [{"type": "text", "text": "Here is "}, 
+           {"type": "image_url", "image_url": {"url": "data:..."}},
+           {"type": "text", "text": " for you"}]
+        
+        This way the model knows base64 is an IMAGE, not text.
+        """
+        if not content or not content.strip():
+            return content
+        
+        # Check if content contains any markdown images
+        md_pattern = r'!\[([^\]]*)\]\(([^)]+)\)'
+        matches = list(re.finditer(md_pattern, content))
+        
+        if not matches:
+            # No markdown images, return string as-is
+            return content
+        
+        # Build structured content array
+        structured_parts = []
+        last_end = 0
+        
+        for match in matches:
+            # Add text before this image
+            if match.start() > last_end:
+                text_before = content[last_end:match.start()]
+                if text_before.strip():
+                    structured_parts.append({
+                        "type": "text",
+                        "text": text_before
+                    })
+            
+            # Process the image
+            alt_text = match.group(1)
+            url = match.group(2).strip()
+            
+            if is_base64_image(url):
+                # Already base64, just add as image_url
+                structured_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": url}
+                })
+            elif url:
+                # Try to convert URL to base64
+                try:
+                    base64_data = await self._url_to_base64(url)
+                    if base64_data:
+                        content_type = self._guess_content_type(url)
+                        structured_parts.append({
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{content_type};base64,{base64_data}"}
+                        })
+                        logger.info(f"Converted markdown image to structured format: {url[:50]}...")
+                    else:
+                        # Failed to get base64, keep as text
+                        structured_parts.append({
+                            "type": "text",
+                            "text": match.group(0)
+                        })
+                except Exception as e:
+                    logger.warning(f"Failed to convert image URL {url[:50]}...: {e}")
+                    structured_parts.append({
+                        "type": "text",
+                        "text": match.group(0)
+                    })
+            
+            last_end = match.end()
+        
+        # Add remaining text after last image
+        if last_end < len(content):
+            remaining = content[last_end:]
+            if remaining.strip():
+                structured_parts.append({
+                    "type": "text",
+                    "text": remaining
+                })
+        
+        # If only one text part, return as string
+        if len(structured_parts) == 1 and structured_parts[0].get("type") == "text":
+            return structured_parts[0]["text"]
+        
+        return structured_parts
     
     async def _rewrite_string_content(self, content: str) -> str:
         """
