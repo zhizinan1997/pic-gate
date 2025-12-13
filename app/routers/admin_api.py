@@ -491,9 +491,11 @@ _max_logs = 500
 
 def add_log(level: str, message: str):
     """Add a log entry to the in-memory log store."""
-    from datetime import datetime
+    from datetime import datetime, timezone, timedelta
+    # Use Beijing time (UTC+8)
+    beijing_tz = timezone(timedelta(hours=8))
     _logs.append({
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "time": datetime.now(beijing_tz).strftime("%Y-%m-%d %H:%M:%S"),
         "level": level,
         "message": message
     })
