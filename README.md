@@ -14,11 +14,28 @@ PicGate 是一个专为 OpenWebUI 设计的 AI 绘图网关，解决 AI 生成�
 - 🔄 **Base64 转 URL** - 自动将 AI 返回的 Base64 图片转换为可访问的 HTTP URL
 - 💾 **本地缓存** - 图片保存在本地，支持 TTL 自动过期清理
 - ☁️ **R2 云存储** - 可选的 Cloudflare R2 存储，永久保存图片
-- 🔌 **OpenAI 兼容** - 完全兼容 OpenAI API 格式，无缝对接 OpenWebUI
+- 🔌 **OpenAI 兼容** - 完全兼容 OpenAI API 格式，无缝对接 OpenWebUI 及其他兼容客户端
 - 🛡️ **安全访问** - 支持 API 密钥认证
 - 📊 **管理后台** - 完整的中文管理界面
+- 🔄 **多轮对话支持** - 支持在多轮对话中修改已生成的图片
 
-## 🚀 快速开始
+## � 效果截图
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/screenshots/dashboard.png" width="400" alt="仪表盘"><br><b>仪表盘</b></td>
+    <td align="center"><img src="docs/screenshots/settings.png" width="400" alt="设置"><br><b>设置页面</b></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screenshots/cache.png" width="400" alt="缓存管理"><br><b>缓存管理</b></td>
+    <td align="center"><img src="docs/screenshots/images.png" width="400" alt="图片预览"><br><b>图片预览</b></td>
+  </tr>
+  <tr>
+    <td align="center" colspan="2"><img src="docs/screenshots/logs.png" width="600" alt="系统日志"><br><b>系统日志</b></td>
+  </tr>
+</table>
+
+## �🚀 快速开始
 
 ### Docker 部署（推荐）
 
@@ -83,6 +100,10 @@ uvicorn app.main:app --host 0.0.0.0 --port 5643 --reload
 
 仪表盘页面提供系统状态的整体概览：
 
+<p align="center">
+  <img src="docs/screenshots/dashboard.png" width="700" alt="仪表盘">
+</p>
+
 | 统计项      | 说明                                  |
 | ----------- | ------------------------------------- |
 | 📊 总图片数 | 系统中所有图片的数量（包括本地和 R2） |
@@ -97,6 +118,10 @@ uvicorn app.main:app --host 0.0.0.0 --port 5643 --reload
 ### ⚙️ 设置
 
 设置页面用于配置所有系统参数，支持**自动保存**（修改后 2 秒自动保存）。
+
+<p align="center">
+  <img src="docs/screenshots/settings.png" width="700" alt="设置页面">
+</p>
 
 #### 🤖 上游 AI API
 
@@ -146,6 +171,10 @@ uvicorn app.main:app --host 0.0.0.0 --port 5643 --reload
 
 缓存管理页面用于管理本地图片缓存。
 
+<p align="center">
+  <img src="docs/screenshots/cache.png" width="700" alt="缓存管理">
+</p>
+
 #### 缓存统计
 
 - **本地图片数**：当前本地存储的图片数量
@@ -176,6 +205,10 @@ uvicorn app.main:app --host 0.0.0.0 --port 5643 --reload
 ### 🖼️ 图片预览
 
 图片预览页面提供图片网格浏览和管理功能。
+
+<p align="center">
+  <img src="docs/screenshots/images.png" width="700" alt="图片预览">
+</p>
 
 #### 功能说明
 
@@ -214,6 +247,10 @@ uvicorn app.main:app --host 0.0.0.0 --port 5643 --reload
 ### 📋 日志
 
 日志页面显示系统运行日志，便于调试和监控。
+
+<p align="center">
+  <img src="docs/screenshots/logs.png" width="700" alt="系统日志">
+</p>
 
 #### 日志内容
 

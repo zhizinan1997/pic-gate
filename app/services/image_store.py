@@ -228,23 +228,87 @@ class ImageStore:
     async def get_base64(self, image_id: str) -> Optional[str]:
         """
         Get base64-encoded image data.
-        Loads from local storage or R2 fallback.
+        Loads from local storage first, with R2 fallback if local not available.
+        
+        Args:
+            image_id: UUID of the image (36 characters with 4 hyphens)
         
         Returns:
-            Base64-encoded string or None if not found
+            Base64-encoded string or None if not found anywhere
         """
-        local_path = await self.get_local_path(image_id)
-        
-        if local_path:
-            image_bytes = local_path.read_bytes()
-            return base64.b64encode(image_bytes).decode('utf-8')
-        
-        # TODO: Phase D - R2 fallback
-        image = await self.get_by_id(image_id)
-        if image and image.has_r2_copy:
-            logger.info(f"Image {image_id} needs R2 download (not implemented)")
+        # Input validation
+        if not image_id or not isinstance(image_id, str):
+            logger.warning(f"Invalid image_id provided: {image_id}")
             return None
+        
+        image_id = image_id.strip()
+        
+        # Basic UUID format validation
+        if len(image_id) != 36 or image_id.count("-") != 4:
+            logger.warning(f"Image ID does not look like a UUID: {image_id}")
+            return None
+        
+        # Try local path first
+        try:
+            local_path = await self.get_local_path(image_id)
             
+            if local_path:
+                try:
+                    image_bytes = local_path.read_bytes()
+                    return base64.b64encode(image_bytes).decode('utf-8')
+                except Exception as e:
+                    logger.error(f"Failed to read local file {local_path}: {e}")
+                    # Fall through to R2 fallback
+        except Exception as e:
+            logger.error(f"Error getting local path for {image_id}: {e}")
+        
+        # R2 fallback - download from R2 if available
+        try:
+            image = await self.get_by_id(image_id)
+        except Exception as e:
+            logger.error(f"Database error getting image {image_id}: {e}")
+            return None
+        
+        if image and image.has_r2_copy:
+            try:
+                from app.services.settings_service import get_settings
+                from app.services.r2_client import create_r2_client
+                
+                settings = await get_settings(self.db)
+                r2_client = create_r2_client(settings)
+                
+                if r2_client:
+                    logger.info(f"Attempting R2 fallback for image {image_id}")
+                    image_bytes, error = await r2_client.download_image(image_id)
+                    
+                    if image_bytes:
+                        logger.info(f"Downloaded image {image_id} from R2 ({len(image_bytes)} bytes)")
+                        
+                        # Cache locally for future use
+                        try:
+                            # Ensure images directory exists
+                            self.images_dir.mkdir(parents=True, exist_ok=True)
+                            
+                            ext = self._get_extension(image.content_type or "image/png")
+                            filename = f"{image_id}{ext}"
+                            local_file = self.images_dir / filename
+                            local_file.write_bytes(image_bytes)
+                            
+                            image.has_local_copy = True
+                            image.local_path = filename
+                            await self.db.commit()
+                            logger.info(f"Cached R2 image {image_id} locally")
+                        except Exception as e:
+                            logger.warning(f"Failed to cache R2 image locally: {e}")
+                        
+                        return base64.b64encode(image_bytes).decode('utf-8')
+                    else:
+                        logger.warning(f"Failed to download {image_id} from R2: {error}")
+                else:
+                    logger.warning(f"R2 client not available for fallback of {image_id}")
+            except Exception as e:
+                logger.error(f"R2 fallback failed for {image_id}: {e}")
+        
         return None
     
     async def update_last_accessed(self, image_id: str):
@@ -270,26 +334,64 @@ async def extract_image_id_from_url(url: str, public_base_url: str = "") -> Opti
     """
     Extract image ID from a PicGate image URL.
     
-    Handles:
+    Handles various URL formats:
     - /images/{image_id}
     - http://host/images/{image_id}
     - https://domain.com/images/{image_id}
+    - URLs with query strings: /images/{image_id}?foo=bar
+    - URLs with fragments: /images/{image_id}#section
+    - URL-encoded paths
+    
+    Args:
+        url: The URL to extract image ID from
+        public_base_url: Optional base URL to match against
     
     Returns:
         Image ID if URL matches PicGate format, None otherwise
     """
+    # Input validation
+    if not url or not isinstance(url, str):
+        return None
+    
     # Normalize URL
     url = url.strip()
+    
+    if not url:
+        return None
+    
+    # Handle URL encoding
+    try:
+        from urllib.parse import unquote
+        url = unquote(url)
+    except Exception:
+        pass
     
     # Check for /images/ pattern
     if "/images/" in url:
         # Extract everything after /images/
         parts = url.split("/images/")
         if len(parts) >= 2:
-            image_id = parts[-1].split("?")[0].split("#")[0]  # Remove query/fragment
-            # Basic UUID validation (36 chars with hyphens)
+            # Get the last part (in case of multiple /images/ in URL)
+            image_id_part = parts[-1]
+            
+            # Remove query string and fragment
+            image_id = image_id_part.split("?")[0].split("#")[0].strip()
+            
+            # Remove any trailing slashes or file extensions that might be appended
+            if image_id.endswith("/"):
+                image_id = image_id[:-1]
+            
+            # Basic UUID validation (36 chars with hyphens in correct positions)
             if len(image_id) == 36 and image_id.count("-") == 4:
-                return image_id
+                # Additional validation: check hyphen positions (8-4-4-4-12 format)
+                parts = image_id.split("-")
+                if len(parts) == 5 and all(len(p) == l for p, l in zip(parts, [8, 4, 4, 4, 12])):
+                    # Validate hex characters
+                    try:
+                        int(image_id.replace("-", ""), 16)
+                        return image_id
+                    except ValueError:
+                        pass
     
     return None
 

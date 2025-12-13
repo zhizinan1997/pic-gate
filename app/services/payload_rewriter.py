@@ -89,9 +89,18 @@ class PayloadRewriter:
             if key in ("image", "init_image", "mask"):
                 result[key] = await self._convert_image_field(value)
             
-            # Handle OpenAI chat message content array
-            elif key == "content" and isinstance(value, list):
-                result[key] = await self._rewrite_content_array(value)
+            # Handle OpenAI chat message content (array or string with markdown images)
+            elif key == "content":
+                if value is None:
+                    # Some clients send null content
+                    result[key] = value
+                elif isinstance(value, list):
+                    result[key] = await self._rewrite_content_array(value)
+                elif isinstance(value, str):
+                    result[key] = await self._rewrite_string_content(value)
+                else:
+                    # Unexpected type, pass through
+                    result[key] = value
             
             # Handle tool_calls and function_call arguments (may contain JSON strings)
             elif key == "arguments" and isinstance(value, str):
@@ -111,63 +120,195 @@ class PayloadRewriter:
         """Rewrite a list."""
         return [await self._rewrite_value(item) for item in lst]
     
+    async def _rewrite_string_content(self, content: str) -> str:
+        """
+        Rewrite a string content that may contain image URLs.
+        
+        This is CRITICAL for multi-turn conversations where assistant messages
+        contain image URLs. Handles:
+        - Markdown image syntax: ![alt](url)
+        - HTML img tags: <img src="url" ...>
+        
+        These URLs must be converted to base64 so the upstream AI can "see" them.
+        """
+        if not content or not content.strip():
+            return content
+        
+        result = content
+        
+        # Pattern 1: Markdown image syntax: ![alt](url)
+        md_pattern = r'!\[([^\]]*)\]\(([^)]+)\)'
+        md_matches = list(re.finditer(md_pattern, result))
+        
+        # Process matches in reverse order to preserve string positions
+        for match in reversed(md_matches):
+            alt_text = match.group(1)
+            url = match.group(2).strip()
+            
+            # Skip if already base64 or empty
+            if not url or is_base64_image(url):
+                continue
+            
+            # Try to convert URL to base64
+            try:
+                base64_data = await self._url_to_base64(url)
+                if base64_data:
+                    # Detect content type from URL extension if possible
+                    content_type = self._guess_content_type(url)
+                    replacement = f"![{alt_text}](data:{content_type};base64,{base64_data})"
+                    result = result[:match.start()] + replacement + result[match.end():]
+                    logger.info(f"Converted markdown image URL to base64: {url[:50]}...")
+            except Exception as e:
+                logger.warning(f"Failed to convert markdown image URL {url[:50]}...: {e}")
+        
+        # Pattern 2: HTML img tags: <img src="url" ...> or <img src='url' ...>
+        html_pattern = r'<img\s+[^>]*src=["\']([^"\'>]+)["\'][^>]*>'
+        html_matches = list(re.finditer(html_pattern, result, re.IGNORECASE))
+        
+        for match in reversed(html_matches):
+            url = match.group(1).strip()
+            
+            # Skip if already base64 or empty
+            if not url or is_base64_image(url):
+                continue
+            
+            try:
+                base64_data = await self._url_to_base64(url)
+                if base64_data:
+                    content_type = self._guess_content_type(url)
+                    # Replace just the src attribute value
+                    original_tag = match.group(0)
+                    new_tag = original_tag.replace(url, f"data:{content_type};base64,{base64_data}")
+                    result = result[:match.start()] + new_tag + result[match.end():]
+                    logger.info(f"Converted HTML img URL to base64: {url[:50]}...")
+            except Exception as e:
+                logger.warning(f"Failed to convert HTML img URL {url[:50]}...: {e}")
+        
+        return result
+    
+    def _guess_content_type(self, url: str) -> str:
+        """Guess image content type from URL extension."""
+        url_lower = url.lower()
+        if '.jpg' in url_lower or '.jpeg' in url_lower:
+            return 'image/jpeg'
+        elif '.gif' in url_lower:
+            return 'image/gif'
+        elif '.webp' in url_lower:
+            return 'image/webp'
+        elif '.svg' in url_lower:
+            return 'image/svg+xml'
+        else:
+            return 'image/png'  # Default to PNG
+    
     async def _rewrite_content_array(self, content: list) -> list:
         """
         Rewrite a chat message content array.
         
-        Handles formats like:
+        Handles various formats used by different clients:
         - {"type": "image_url", "image_url": {"url": "..."}}
+        - {"type": "image_url", "image_url": "..."} (some clients use string directly)
         - {"type": "input_image", "input_image": {"url": "..."}}
         - {"type": "image", "image": "..."}
+        - {"type": "text", "text": "..."} (may contain markdown images)
         """
         result = []
         
         for item in content:
+            if item is None:
+                continue
+            
             if not isinstance(item, dict):
-                result.append(item)
+                # Could be a plain string in content array
+                if isinstance(item, str):
+                    rewritten = await self._rewrite_string_content(item)
+                    result.append(rewritten)
+                else:
+                    result.append(item)
                 continue
             
             item_type = item.get("type")
             
             if item_type == "image_url":
-                # Standard OpenAI format
+                # Standard OpenAI format - but some clients vary the structure
                 image_url_obj = item.get("image_url", {})
-                url = image_url_obj.get("url", "")
+                
+                # Handle both dict and string formats
+                if isinstance(image_url_obj, str):
+                    url = image_url_obj
+                elif isinstance(image_url_obj, dict):
+                    url = image_url_obj.get("url", "")
+                else:
+                    url = ""
                 
                 if url and not is_base64_image(url):
-                    base64_data = await self._url_to_base64(url)
-                    if base64_data:
-                        # Create new item with base64 data
-                        new_item = deepcopy(item)
-                        new_item["image_url"]["url"] = f"data:image/png;base64,{base64_data}"
-                        result.append(new_item)
-                        continue
+                    try:
+                        base64_data = await self._url_to_base64(url)
+                        if base64_data:
+                            content_type = self._guess_content_type(url)
+                            new_item = deepcopy(item)
+                            if isinstance(new_item.get("image_url"), dict):
+                                new_item["image_url"]["url"] = f"data:{content_type};base64,{base64_data}"
+                            else:
+                                new_item["image_url"] = {"url": f"data:{content_type};base64,{base64_data}"}
+                            result.append(new_item)
+                            continue
+                    except Exception as e:
+                        logger.warning(f"Failed to convert image_url: {e}")
                 
                 result.append(item)
             
             elif item_type == "input_image":
-                # Alternative format
+                # Alternative format used by some clients
                 input_image_obj = item.get("input_image", {})
-                url = input_image_obj.get("url", "")
+                
+                if isinstance(input_image_obj, str):
+                    url = input_image_obj
+                elif isinstance(input_image_obj, dict):
+                    url = input_image_obj.get("url", "")
+                else:
+                    url = ""
                 
                 if url and not is_base64_image(url):
-                    base64_data = await self._url_to_base64(url)
-                    if base64_data:
-                        new_item = deepcopy(item)
-                        new_item["input_image"]["url"] = f"data:image/png;base64,{base64_data}"
-                        result.append(new_item)
-                        continue
+                    try:
+                        base64_data = await self._url_to_base64(url)
+                        if base64_data:
+                            content_type = self._guess_content_type(url)
+                            new_item = deepcopy(item)
+                            if isinstance(new_item.get("input_image"), dict):
+                                new_item["input_image"]["url"] = f"data:{content_type};base64,{base64_data}"
+                            else:
+                                new_item["input_image"] = {"url": f"data:{content_type};base64,{base64_data}"}
+                            result.append(new_item)
+                            continue
+                    except Exception as e:
+                        logger.warning(f"Failed to convert input_image: {e}")
                 
                 result.append(item)
             
             elif item_type == "image":
                 # Direct image field
                 image_data = item.get("image", "")
-                if image_data and not is_base64_image(image_data):
-                    base64_data = await self._url_to_base64(image_data)
-                    if base64_data:
+                if image_data and isinstance(image_data, str) and not is_base64_image(image_data):
+                    try:
+                        base64_data = await self._url_to_base64(image_data)
+                        if base64_data:
+                            new_item = deepcopy(item)
+                            new_item["image"] = base64_data
+                            result.append(new_item)
+                            continue
+                    except Exception as e:
+                        logger.warning(f"Failed to convert image field: {e}")
+                
+                result.append(item)
+            
+            elif item_type == "text":
+                # Text content may contain markdown images
+                text = item.get("text", "")
+                if text and isinstance(text, str):
+                    rewritten_text = await self._rewrite_string_content(text)
+                    if rewritten_text != text:
                         new_item = deepcopy(item)
-                        new_item["image"] = base64_data
+                        new_item["text"] = rewritten_text
                         result.append(new_item)
                         continue
                 
