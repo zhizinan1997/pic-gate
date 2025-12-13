@@ -581,6 +581,54 @@ async def _process_chat_response(
         message = choice.get("message", {})
         content = message.get("content")
         
+        # CRITICAL FIX: Handle images in message.images field (OpenAI-format Gemini responses)
+        # Some APIs (like Gemini via OpenAI-compatible proxies) return images in a separate "images" field
+        images_field = message.get("images", [])
+        if images_field:
+            processed_images = []
+            for img_item in images_field:
+                if isinstance(img_item, dict):
+                    image_url_obj = img_item.get("image_url", {})
+                    if isinstance(image_url_obj, dict):
+                        url = image_url_obj.get("url", "")
+                    elif isinstance(image_url_obj, str):
+                        url = image_url_obj
+                    else:
+                        url = ""
+                    
+                    if url.startswith("data:image"):
+                        try:
+                            b64_data = url.split(",", 1)[1]
+                            image = await image_store.save_from_base64(b64_data)
+                            public_url = await build_image_url(request, db, image.image_id)
+                            
+                            processed_images.append({
+                                "type": "image_url",
+                                "image_url": {"url": public_url}
+                            })
+                            logger.info(f"Saved image from images field: {public_url}")
+                            add_log("INFO", f"✅ 对话图片已保存: {image.image_id[:8]}...")
+                        except Exception as e:
+                            logger.error(f"Failed to save image from images field: {e}")
+                            processed_images.append(img_item)  # Keep original on error
+                    else:
+                        processed_images.append(img_item)
+                else:
+                    processed_images.append(img_item)
+            
+            # Convert to content array with images
+            if processed_images:
+                new_content = processed_images
+                # If there was original text content, prepend it
+                if content and isinstance(content, str):
+                    new_content = [{"type": "text", "text": content}] + processed_images
+                
+                message["content"] = new_content
+                # Remove the images field as we've moved them to content
+                if "images" in message:
+                    del message["images"]
+                continue  # Move to next choice
+        
         if content is None:
             continue
         
