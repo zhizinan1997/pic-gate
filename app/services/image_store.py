@@ -15,9 +15,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.models import Image
-from app.config import IMAGES_DIR
+from app.config import IMAGES_DIR, THUMBNAILS_DIR
 
 logger = logging.getLogger(__name__)
+
+# Thumbnail settings
+THUMBNAIL_MAX_SIZE = (200, 200)
+THUMBNAIL_QUALITY = 70
 
 
 class ImageStore:
@@ -86,6 +90,12 @@ class ImageStore:
         self.db.add(image)
         await self.db.commit()
         await self.db.refresh(image)
+        
+        # Generate thumbnail
+        thumbnail_path = await self._generate_thumbnail(image_id, image_bytes)
+        if thumbnail_path:
+            image.thumbnail_path = thumbnail_path
+            await self.db.commit()
         
         # Trigger background upload to R2
         import asyncio
@@ -317,6 +327,97 @@ class ImageStore:
         if image:
             image.last_accessed_at = datetime.utcnow()
             await self.db.commit()
+    
+    async def _generate_thumbnail(self, image_id: str, image_bytes: bytes) -> Optional[str]:
+        """
+        Generate a thumbnail and save it locally.
+        
+        Args:
+            image_id: UUID of the image
+            image_bytes: Original image bytes
+            
+        Returns:
+            Thumbnail filename if successful, None otherwise
+        """
+        try:
+            import io
+            from PIL import Image as PILImage
+            
+            # Open image
+            img = PILImage.open(io.BytesIO(image_bytes))
+            
+            # Create thumbnail (maintains aspect ratio)
+            img.thumbnail(THUMBNAIL_MAX_SIZE, PILImage.Resampling.LANCZOS)
+            
+            # Convert to RGB if necessary (for JPEG output)
+            if img.mode in ('RGBA', 'P', 'LA'):
+                # Create white background for transparency
+                background = PILImage.new('RGB', img.size, (255, 255, 255))
+                if img.mode == 'P':
+                    img = img.convert('RGBA')
+                background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
+                img = background
+            elif img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # Save thumbnail
+            thumbnail_filename = f"{image_id}_thumb.jpg"
+            thumbnail_path = THUMBNAILS_DIR / thumbnail_filename
+            
+            img.save(thumbnail_path, 'JPEG', quality=THUMBNAIL_QUALITY, optimize=True)
+            
+            thumb_size = thumbnail_path.stat().st_size
+            logger.info(f"Generated thumbnail for {image_id} ({thumb_size} bytes)")
+            
+            return thumbnail_filename
+            
+        except Exception as e:
+            logger.warning(f"Failed to generate thumbnail for {image_id}: {e}")
+            return None
+    
+    async def get_thumbnail_path(self, image_id: str) -> Optional[Path]:
+        """
+        Get the local path for an image's thumbnail.
+        
+        Returns:
+            Path to thumbnail file or None if not available
+        """
+        image = await self.get_by_id(image_id)
+        if image and image.thumbnail_path:
+            thumb_path = THUMBNAILS_DIR / image.thumbnail_path
+            if thumb_path.exists():
+                return thumb_path
+        return None
+    
+    async def ensure_thumbnail(self, image_id: str) -> Optional[Path]:
+        """
+        Ensure a thumbnail exists for the image, generating if needed.
+        Only works for images with local copies.
+        
+        Returns:
+            Path to thumbnail or None if cannot generate
+        """
+        # Check if thumbnail already exists
+        thumb_path = await self.get_thumbnail_path(image_id)
+        if thumb_path:
+            return thumb_path
+        
+        # Try to generate from local copy
+        image = await self.get_by_id(image_id)
+        if not image:
+            return None
+        
+        if image.has_local_copy and image.local_path:
+            local_file = self.images_dir / image.local_path
+            if local_file.exists():
+                image_bytes = local_file.read_bytes()
+                thumbnail_filename = await self._generate_thumbnail(image_id, image_bytes)
+                if thumbnail_filename:
+                    image.thumbnail_path = thumbnail_filename
+                    await self.db.commit()
+                    return THUMBNAILS_DIR / thumbnail_filename
+        
+        return None
     
     def _get_extension(self, content_type: str) -> str:
         """Get file extension from content type."""

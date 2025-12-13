@@ -81,6 +81,7 @@ class Image(Base):
     # Storage status
     has_local_copy = Column(Boolean, default=True)
     has_r2_copy = Column(Boolean, default=False)
+    thumbnail_path = Column(String(500), default="")  # 缩略图相对路径
     
     # R2 upload tracking
     upload_status = Column(String(20), default="pending")  # pending/uploading/uploaded/failed

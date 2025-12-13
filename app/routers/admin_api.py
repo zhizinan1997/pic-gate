@@ -693,3 +693,69 @@ async def batch_delete_images(
         "errors": errors
     }
 
+
+@router.post("/generate-thumbnails")
+async def generate_thumbnails(
+    request: Request,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Generate thumbnails for all images missing them.
+    
+    Only processes images with local copies.
+    """
+    verify_session(request)
+    
+    from sqlalchemy import select, or_
+    from app.models import Image
+    from app.services.image_store import ImageStore
+    from app.config import IMAGES_DIR
+    
+    image_store = ImageStore(db)
+    
+    # Get images with local copies but no thumbnails
+    result = await db.execute(
+        select(Image).where(
+            Image.has_local_copy == True,
+            or_(Image.thumbnail_path == "", Image.thumbnail_path == None)
+        )
+    )
+    images = result.scalars().all()
+    
+    generated = 0
+    skipped = 0
+    errors = 0
+    
+    for img in images:
+        try:
+            if img.local_path:
+                local_file = IMAGES_DIR / img.local_path
+                if local_file.exists():
+                    image_bytes = local_file.read_bytes()
+                    thumb_filename = await image_store._generate_thumbnail(img.image_id, image_bytes)
+                    if thumb_filename:
+                        img.thumbnail_path = thumb_filename
+                        generated += 1
+                    else:
+                        errors += 1
+                else:
+                    skipped += 1
+            else:
+                skipped += 1
+        except Exception as e:
+            logger.warning(f"Failed to generate thumbnail for {img.image_id}: {e}")
+            errors += 1
+    
+    await db.commit()
+    
+    message = f"缩略图生成完成: {generated} 成功, {skipped} 跳过, {errors} 失败"
+    add_log("INFO", message)
+    
+    return {
+        "success": True,
+        "message": message,
+        "generated": generated,
+        "skipped": skipped,
+        "errors": errors,
+        "total": len(images)
+    }

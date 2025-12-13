@@ -60,12 +60,16 @@
             <button onclick="retryUploads()" class="btn btn-primary">
                 🔄 重试失败上传
             </button>
+            <button onclick="generateThumbnails()" class="btn btn-info">
+                🖼️ 生成缩略图
+            </button>
         </div>
         <p class="help-text">
             <strong>清理过期缓存：</strong> 删除超过 TTL 的本地文件。<br>
             <strong>清除所有本地缓存：</strong> 删除所有本地图片（保留元数据，可从 R2 恢复）。<br>
             <strong>上传到 R2：</strong> 将待处理的图片上传到 R2 存储。<br>
-            <strong>重试失败上传：</strong> 重新尝试上传失败的图片。
+            <strong>重试失败上传：</strong> 重新尝试上传失败的图片。<br>
+            <strong>生成缩略图：</strong> 为所有本地图片生成预览缩略图，加快图片预览页面加载。
         </p>
     </div>
 </div>
@@ -268,6 +272,23 @@
       loadStats();
     } catch (err) {
       showMessage("上传失败", true);
+    }
+  }
+
+  async function generateThumbnails() {
+    if (!confirm("这将为所有缺少缩略图的本地图片生成缩略图。\n图片较多时可能需要一段时间，确认继续？")) {
+      return;
+    }
+    
+    try {
+      showMessage("正在生成缩略图，请稍候...", false);
+      const response = await fetch("/admin/api/generate-thumbnails", {
+        method: "POST",
+      });
+      const data = await response.json();
+      showMessage(data.message, !data.success);
+    } catch (err) {
+      showMessage("生成缩略图失败", true);
     }
   }
 

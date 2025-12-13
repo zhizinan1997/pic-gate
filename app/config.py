@@ -14,10 +14,12 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 IMAGES_DIR = Path(os.getenv("IMAGES_DIR", DATA_DIR / "images"))
+THUMBNAILS_DIR = Path(os.getenv("THUMBNAILS_DIR", DATA_DIR / "thumbnails"))
 DB_DIR = Path(os.getenv("DB_DIR", DATA_DIR / "db"))
 
 # Ensure directories exist
 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+THUMBNAILS_DIR.mkdir(parents=True, exist_ok=True)
 DB_DIR.mkdir(parents=True, exist_ok=True)
 
 # Database

@@ -19,19 +19,19 @@ PicGate 是一个专为 OpenWebUI 设计的 AI 绘图网关，解决 AI 生成�
 - 📊 **管理后台** - 完整的中文管理界面
 - 🔄 **多轮对话支持** - 支持在多轮对话中修改已生成的图片
 
-## � 效果截图
+## 📸 效果截图
 
 <table>
   <tr>
-    <td align="center"><img src="docs/screenshots/dashboard.png" width="400" alt="仪表盘"><br><b>仪表盘</b></td>
-    <td align="center"><img src="docs/screenshots/settings.png" width="400" alt="设置"><br><b>设置页面</b></td>
+    <td align="center"><img src="https://raw.githubusercontent.com/zhizinan1997/pic-gate/main/docs/screenshots/dashboard.png" width="400" alt="仪表盘"><br><b>仪表盘</b></td>
+    <td align="center"><img src="https://raw.githubusercontent.com/zhizinan1997/pic-gate/main/docs/screenshots/settings.png" width="400" alt="设置"><br><b>设置页面</b></td>
   </tr>
   <tr>
-    <td align="center"><img src="docs/screenshots/cache.png" width="400" alt="缓存管理"><br><b>缓存管理</b></td>
-    <td align="center"><img src="docs/screenshots/images.png" width="400" alt="图片预览"><br><b>图片预览</b></td>
+    <td align="center"><img src="https://raw.githubusercontent.com/zhizinan1997/pic-gate/main/docs/screenshots/cache.png" width="400" alt="缓存管理"><br><b>缓存管理</b></td>
+    <td align="center"><img src="https://raw.githubusercontent.com/zhizinan1997/pic-gate/main/docs/screenshots/images.png" width="400" alt="图片预览"><br><b>图片预览</b></td>
   </tr>
   <tr>
-    <td align="center" colspan="2"><img src="docs/screenshots/logs.png" width="600" alt="系统日志"><br><b>系统日志</b></td>
+    <td align="center" colspan="2"><img src="https://raw.githubusercontent.com/zhizinan1997/pic-gate/main/docs/screenshots/logs.png" width="600" alt="系统日志"><br><b>系统日志</b></td>
   </tr>
 </table>
 

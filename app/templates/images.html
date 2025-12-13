@@ -262,7 +262,7 @@
 {% block scripts %}
 <script>
     let currentPage = 1;
-    const pageSize = 24;
+    const pageSize = 20;  // 每页20张，优化加载速度
     let selectedImages = new Set();
     let currentModalImageId = null;
     let imagesData = [];
@@ -304,7 +304,7 @@
                                onchange="toggleSelect('${img.image_id}')"
                                id="check-${img.image_id}">
                         <div class="image-thumb-container" onclick="showImage('${img.image_id}', '${img.content_type}', ${img.size_bytes}, '${img.created_at}', ${img.has_local_copy}, ${img.has_r2_copy})">
-                            <img class="image-thumb" src="/images/${img.image_id}" alt="${img.image_id}" loading="lazy"
+                            <img class="image-thumb" src="/images/${img.image_id}/thumbnail" alt="${img.image_id}" loading="lazy"
                                  onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2260%22>🖼️</text></svg>'">
                         </div>
                         <div class="image-info">
