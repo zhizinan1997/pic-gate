@@ -296,15 +296,165 @@ uvicorn app.main:app --host 0.0.0.0 --port 5643 --reload
 
 ### 图片访问
 
-| 端点                 | 方法 | 说明                    |
-| -------------------- | ---- | ----------------------- |
-| `/images/{image_id}` | GET  | 访问图片（自动回源 R2） |
+| 端点                           | 方法 | 说明                    |
+| ------------------------------ | ---- | ----------------------- |
+| `/images/{image_id}`           | GET  | 访问原图（自动回源 R2） |
+| `/images/{image_id}/thumbnail` | GET  | 访问缩略图（仅本地）    |
 
 ### 系统端点
 
 | 端点      | 方法 | 说明     |
 | --------- | ---- | -------- |
 | `/health` | GET  | 健康检查 |
+
+---
+
+## ⚠️ 重要注意事项
+
+### 下游客户端（OpenWebUI 等）
+
+| 注意事项               | 说明                                                    |
+| ---------------------- | ------------------------------------------------------- |
+| **必须使用非流式请求** | PicGate 目前只支持 `stream: false`，不支持 SSE 流式输出 |
+| **API 格式**           | 使用标准 OpenAI 格式请求 PicGate                        |
+
+### 上游 AI API
+
+| 注意事项                       | 说明                                                                                 |
+| ------------------------------ | ------------------------------------------------------------------------------------ |
+| **推荐使用 OpenAI 格式**       | 通过 one-api/new-api 等中转服务请求 Gemini，避免原生 API 的 `thought_signature` 问题 |
+| **避免 Thinking 模型原生 API** | 如 gemini-2.0-flash-thinking 的原生 API 需要 `thought_signature`，PicGate 暂不支持   |
+| **支持的响应格式**             | 支持 `message.content` 或 `message.images` 中的 base64 图片                          |
+
+---
+
+## 📡 API 请求示例
+
+### 文生图请求（下游 → PicGate）
+
+```bash
+curl -X POST "http://localhost:5643/v1/images/generations" \
+  -H "Authorization: Bearer YOUR_GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "picgate",
+    "prompt": "一只橘猫在阳光下睡觉",
+    "n": 1,
+    "size": "1024x1024"
+  }'
+```
+
+**响应示例：**
+
+```json
+{
+  "created": 1702468800,
+  "data": [
+    {
+      "url": "https://your-domain.com/images/550e8400-e29b-41d4-a716-446655440000",
+      "revised_prompt": "..."
+    }
+  ]
+}
+```
+
+### 对话绘图请求（下游 → PicGate）
+
+```bash
+curl -X POST "http://localhost:5643/v1/chat/completions" \
+  -H "Authorization: Bearer YOUR_GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "picgate",
+    "stream": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": "画一只猫"
+      }
+    ]
+  }'
+```
+
+**响应示例：**
+
+```json
+{
+  "id": "chatcmpl-xxx",
+  "choices": [
+    {
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "https://your-domain.com/images/550e8400-e29b-41d4-a716-446655440000"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
+```
+
+### 多轮对话（修改图片）
+
+```bash
+curl -X POST "http://localhost:5643/v1/chat/completions" \
+  -H "Authorization: Bearer YOUR_GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "picgate",
+    "stream": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": "画一只猫"
+      },
+      {
+        "role": "assistant",
+        "content": "![image](https://your-domain.com/images/550e8400-e29b-41d4-a716-446655440000)"
+      },
+      {
+        "role": "user",
+        "content": "把猫换成布偶猫，场景保持不变"
+      }
+    ]
+  }'
+```
+
+> **多轮对话原理**：PicGate 会自动将历史消息中的图片 URL 转换为 base64 发送给上游 AI，使 AI 能够"看到"之前生成的图片。
+
+---
+
+## 🔄 数据流示意图
+
+```
+┌─────────────────┐         ┌─────────────┐         ┌─────────────────┐
+│   OpenWebUI     │         │   PicGate   │         │  上游 AI API    │
+│   (下游客户端)   │         │   (网关)     │         │  (Gemini 等)    │
+└────────┬────────┘         └──────┬──────┘         └────────┬────────┘
+         │                         │                         │
+         │  1. POST /v1/chat/...   │                         │
+         │  stream: false          │                         │
+         │ ───────────────────────>│                         │
+         │                         │                         │
+         │                         │  2. 将 URL 转为 base64   │
+         │                         │  POST 上游 API          │
+         │                         │ ───────────────────────>│
+         │                         │                         │
+         │                         │  3. 返回 base64 图片     │
+         │                         │ <───────────────────────│
+         │                         │                         │
+         │                         │  4. 保存图片到本地/R2   │
+         │                         │     生成访问 URL        │
+         │                         │                         │
+         │  5. 返回图片 URL        │                         │
+         │ <───────────────────────│                         │
+         │                         │                         │
+```
 
 ---
 
@@ -318,6 +468,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 5643 --reload
    - **API Base URL**: `http://your-picgate-host:5643/v1`
    - **API Key**: 你在 PicGate 设置的网关 API 密钥
    - **Model**: 你在 PicGate 设置的网关模型名称（如 `picgate`）
+
+> ⚠️ **注意**：OpenWebUI 的图片功能默认使用非流式请求，与 PicGate 兼容。
 
 ---
 

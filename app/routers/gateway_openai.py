@@ -616,18 +616,28 @@ async def _process_chat_response(
                 else:
                     processed_images.append(img_item)
             
-            # Convert to content array with images
+            # Convert to markdown string format for OpenWebUI compatibility
+            # OpenWebUI expects content as string, not structured array
             if processed_images:
-                new_content = processed_images
-                # If there was original text content, prepend it
-                if content and isinstance(content, str):
-                    new_content = [{"type": "text", "text": content}] + processed_images
+                markdown_parts = []
+                for img in processed_images:
+                    if isinstance(img, dict) and img.get("type") == "image_url":
+                        url = img.get("image_url", {}).get("url", "")
+                        if url:
+                            markdown_parts.append(f"![image]({url})")
                 
-                message["content"] = new_content
-                # Remove the images field as we've moved them to content
-                if "images" in message:
-                    del message["images"]
-                continue  # Move to next choice
+                # Build final content string
+                if markdown_parts:
+                    new_content = "\n".join(markdown_parts)
+                    # If there was original text content, prepend it
+                    if content and isinstance(content, str):
+                        new_content = content + "\n" + new_content
+                    
+                    message["content"] = new_content
+                    # Remove the images field as we've moved them to content
+                    if "images" in message:
+                        del message["images"]
+                    continue  # Move to next choice
         
         if content is None:
             continue
