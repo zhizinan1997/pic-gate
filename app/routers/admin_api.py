@@ -494,8 +494,12 @@ def add_log(level: str, message: str):
     from datetime import datetime, timezone, timedelta
     # Use Beijing time (UTC+8)
     beijing_tz = timezone(timedelta(hours=8))
+    # Ensure we get UTC time first, then convert to Beijing
+    utc_now = datetime.now(timezone.utc)
+    beijing_time = utc_now.astimezone(beijing_tz)
+    
     _logs.append({
-        "time": datetime.now(beijing_tz).strftime("%Y-%m-%d %H:%M:%S"),
+        "time": beijing_time.strftime("%Y-%m-%d %H:%M:%S"),
         "level": level,
         "message": message
     })
@@ -508,7 +512,7 @@ def add_log(level: str, message: str):
 async def get_logs(request: Request):
     """Get system logs."""
     verify_session(request)
-    return {"logs": list(reversed(_logs))}
+    return {"logs": list(_logs)}
 
 
 @router.delete("/logs")

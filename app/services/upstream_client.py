@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 class UpstreamClient:
     """Client for communicating with upstream OpenAI-compatible APIs."""
     
-    def __init__(self, api_base: str, api_key: str, timeout: float = 120.0):
+    def __init__(self, api_base: str, api_key: str, timeout: float = 600.0):
         """
         Initialize the upstream client.
         
