@@ -557,6 +557,19 @@ async def chat_completions(
         return upstream_response
 
 
+def _strip_thinking_tags(content: str) -> str:
+    """
+    Remove <think>...</think> blocks from AI response content.
+    
+    Some AI models (like DeepSeek, QwQ, etc.) include thinking/reasoning 
+    in <think> tags. This function strips these for cleaner output.
+    """
+    import re
+    # Pattern matches <think> opening tag, any content (including newlines), and </think> closing tag
+    pattern = r'<think>[\s\S]*?</think>\s*'
+    return re.sub(pattern, '', content, flags=re.IGNORECASE).strip()
+
+
 async def _process_chat_response(
     response: Dict[str, Any],
     image_store: ImageStore,
@@ -571,6 +584,7 @@ async def _process_chat_response(
     2. content as string with base64 data URL (data:image/...)
     3. content as array with image_url containing base64
     4. Markdown image syntax with base64: ![...](data:image/...)
+    5. Strips <think>...</think> blocks from responses
     """
     import re
     
@@ -629,9 +643,11 @@ async def _process_chat_response(
                 # Build final content string
                 if markdown_parts:
                     new_content = "\n".join(markdown_parts)
-                    # If there was original text content, prepend it
+                    # If there was original text content, prepend it (with think tags stripped)
                     if content and isinstance(content, str):
-                        new_content = content + "\n" + new_content
+                        cleaned_content = _strip_thinking_tags(content)
+                        if cleaned_content:
+                            new_content = cleaned_content + "\n" + new_content
                     
                     message["content"] = new_content
                     # Remove the images field as we've moved them to content
@@ -644,7 +660,8 @@ async def _process_chat_response(
         
         # Handle content as string
         if isinstance(content, str):
-            new_content = content
+            # Strip <think>...</think> blocks first
+            new_content = _strip_thinking_tags(content)
             processed = False
             
             # First check for markdown image syntax with base64 (more specific pattern)
@@ -696,6 +713,10 @@ async def _process_chat_response(
                             logger.error(f"Failed to save base64 image from text: {e}")
                     
                     message["content"] = new_content
+                else:
+                    # No images found, but still update content if think tags were stripped
+                    if new_content != content:
+                        message["content"] = new_content
         
         # Handle content as array (multimodal response)
         elif isinstance(content, list):
