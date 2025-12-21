@@ -139,9 +139,16 @@ class PayloadRewriter:
            {"type": "text", "text": " for you"}]
         
         This way the model knows base64 is an IMAGE, not text.
+        
+        Also handles plain image URLs (not in markdown) by converting them to markdown first.
         """
         if not content or not content.strip():
             return content
+        
+        # First, convert plain image URLs to markdown format
+        # This regex matches URLs that look like images but are NOT already in markdown syntax
+        # Uses negative lookbehind to avoid matching URLs already inside ![...](...) 
+        content = self._convert_plain_urls_to_markdown(content)
         
         # Check if content contains any markdown images
         md_pattern = r'!\[([^\]]*)\]\(([^)]+)\)'
@@ -216,6 +223,59 @@ class PayloadRewriter:
         
         return structured_parts
     
+    def _convert_plain_urls_to_markdown(self, content: str) -> str:
+        """
+        Convert plain image URLs to markdown format.
+        
+        Handles URLs that are:
+        1. PicGate image URLs (containing /images/)
+        2. URLs with common image extensions (.png, .jpg, .jpeg, .gif, .webp)
+        
+        Does NOT convert URLs that are already inside markdown syntax ![](url).
+        """
+        if not content:
+            return content
+        
+        # Pattern to match URLs that look like images
+        # Must start with http:// or https://
+        # Either contains /images/ path (PicGate) or ends with image extension
+        url_pattern = r'(https?://[^\s\)\]]+(?:/images/[^\s\)\]]+|\.(?:png|jpg|jpeg|gif|webp|svg)(?:\?[^\s\)\]]*)?))'
+        
+        result = content
+        matches = list(re.finditer(url_pattern, result, re.IGNORECASE))
+        
+        # Process in reverse to maintain string positions
+        for match in reversed(matches):
+            url = match.group(1)
+            start = match.start()
+            end = match.end()
+            
+            # Check if this URL is already inside markdown syntax
+            # Look for ![ before this position and ] after
+            # If we find "![ ... ](" right before the URL, skip it
+            before_text = result[:start]
+            
+            # Check if there's a "](" immediately before the URL (part of markdown)
+            if before_text.rstrip().endswith(']('):
+                continue
+            
+            # Check if there's "![" before and the URL is inside the parentheses
+            # Pattern: ![any text](URL) - we want to skip URLs already in this format
+            md_check_pattern = r'!\[[^\]]*\]\([^)]*$'
+            if re.search(md_check_pattern, before_text):
+                continue
+            
+            # Also check for HTML img src
+            if before_text.rstrip().endswith('src="') or before_text.rstrip().endswith("src='"):
+                continue
+            
+            # Convert plain URL to markdown format
+            markdown_image = f'![image]({url})'
+            result = result[:start] + markdown_image + result[end:]
+            logger.info(f"Converted plain URL to markdown: {url[:50]}...")
+        
+        return result
+
     async def _rewrite_string_content(self, content: str) -> str:
         """
         Rewrite a string content that may contain image URLs.
