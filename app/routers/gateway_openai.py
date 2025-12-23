@@ -671,20 +671,108 @@ async def _handle_streaming_chat(
         }
         return f"data: {json_module.dumps(chunk, ensure_ascii=False)}\n\n"
     
-    # Check if this is likely an image generation request (heuristic)
+    # Check if this is likely an image generation/editing request
+    # Simplified: Any URL or structured image content triggers interactive mode
     messages = rewritten_body.get("messages", [])
     last_message = messages[-1] if messages else {}
-    last_content = last_message.get("content", "") if isinstance(last_message.get("content"), str) else ""
     
-    # Keywords that suggest image generation
-    image_keywords = ["画", "绘", "生成图", "图片", "draw", "paint", "generate", "image", "picture", "创作"]
-    is_image_request = any(kw in last_content.lower() for kw in image_keywords)
+    # Get content - could be string or array
+    last_content_raw = last_message.get("content", "")
+    
+    # Convert to string for analysis
+    if isinstance(last_content_raw, str):
+        last_content = last_content_raw
+    elif isinstance(last_content_raw, list):
+        text_parts = []
+        for item in last_content_raw:
+            if isinstance(item, dict):
+                if item.get("type") == "text":
+                    text_parts.append(item.get("text", ""))
+        last_content = " ".join(text_parts)
+    else:
+        last_content = ""
+    
+    # Extract image URLs from the message for display
+    import re
+    uploaded_image_urls = []
+    
+    # Check for URLs in string content
+    if isinstance(last_content_raw, str):
+        # Match any http/https URL
+        url_pattern = r'https?://[^\s\)\]\"\'<>]+'
+        uploaded_image_urls = re.findall(url_pattern, last_content_raw)
+    
+    # Check for structured content with image_url
+    has_structured_image = False
+    if isinstance(last_content_raw, list):
+        for item in last_content_raw:
+            if isinstance(item, dict):
+                if item.get("type") in ("image_url", "image", "input_image"):
+                    has_structured_image = True
+                    # Try to extract the URL
+                    img_url_obj = item.get("image_url") or item.get("input_image") or item.get("image")
+                    if isinstance(img_url_obj, dict):
+                        url = img_url_obj.get("url", "")
+                    elif isinstance(img_url_obj, str):
+                        url = img_url_obj
+                    else:
+                        url = ""
+                    if url and not url.startswith("data:"):  # Skip base64
+                        uploaded_image_urls.append(url)
+    
+    # Keywords that suggest image generation/editing
+    image_keywords = [
+        # 中文关键词
+        "画", "绘", "生成图", "图片", "创作", "设计", "制作",
+        "换成", "替换", "修改", "编辑", "改成", "变成", "调整", "优化",
+        "添加", "删除", "去掉", "加上", "移除", "抠图", "合成",
+        "风格", "滤镜", "特效", "背景", "前景", "颜色", "色调",
+        # 英文关键词
+        "draw", "paint", "generate", "image", "picture", "create", "design",
+        "edit", "change", "modify", "replace", "swap", "remove", "add",
+        "style", "filter", "effect", "background", "foreground"
+    ]
+    has_image_keywords = any(kw in last_content.lower() for kw in image_keywords)
+    
+    # Simplified trigger: ANY URL or structured image content triggers interactive mode
+    has_any_url = len(uploaded_image_urls) > 0
+    
+    is_image_request = has_image_keywords or has_any_url or has_structured_image
+    
+    logger.info(f"Image request detection: keywords={has_image_keywords}, urls={len(uploaded_image_urls)}, structured={has_structured_image} -> is_image={is_image_request}")
     
     async def generate_interactive_stream():
         """Generate stream with interactive progress updates for image requests."""
         
-        # Send welcome message immediately
-        welcome_msg = "🍌 中转网关服务器已收到您的消息，正在请求 nano banana🍌 模型绘制图片中，绘制成功后将返回您图片URL/文件，请耐心等待...\n\n"
+        # Build elegant welcome message
+        if uploaded_image_urls:
+            # With uploaded images
+            images_md = "\n".join([f"![📷 原图{i}]({url})" for i, url in enumerate(uploaded_image_urls[:3], 1)])
+            welcome_msg = f"""## 🎨 PicGate 图像处理中心
+
+---
+
+**📥 已接收您的创作请求**
+
+{images_md}
+
+---
+
+⏳ 正在连接 AI 绘图引擎，请稍候...
+
+"""
+        else:
+            # Text-only generation request
+            welcome_msg = """## 🎨 PicGate 图像处理中心
+
+---
+
+**📥 已接收您的创作请求**
+
+⏳ 正在连接 AI 绘图引擎，请稍候...
+
+"""
+        
         yield make_chunk(welcome_msg, include_role=True)
         
         # Start the upstream request in background
@@ -748,7 +836,9 @@ async def _handle_streaming_chat(
             elapsed_seconds += 3
             
             if not fetch_task.done():
-                timer_msg = f"⏱️ 已等待 {elapsed_seconds} 秒，nano banana🍌 正在努力绘制中...\n"
+                # Elegant progress indicator
+                dots = "•" * ((elapsed_seconds // 3) % 4 + 1)
+                timer_msg = f"🔄 **处理中** {dots} 已用时 {elapsed_seconds}s\n"
                 yield make_chunk(timer_msg)
         
         # Get the result
@@ -774,8 +864,8 @@ async def _handle_streaming_chat(
             yield "data: [DONE]\n\n"
             return
         
-        # Success! Send processing message
-        process_msg = "\n\n🎨 已收到 nano banana🍌 绘制的图片，正在为您自动转换格式中，马上就来！\n\n"
+        # Success! Send elegant processing message
+        process_msg = "\n\n---\n\n✨ **图像生成成功！** 正在优化输出格式...\n\n"
         yield make_chunk(process_msg)
         
         # Process the response to extract/convert images
@@ -793,8 +883,16 @@ async def _handle_streaming_chat(
             if processed_response.get("choices"):
                 content = processed_response["choices"][0].get("message", {}).get("content", "")
                 if content:
-                    # Send the final content (image URL)
-                    final_msg = f"✅ 绘制完成！\n\n{content}"
+                    # Send elegant final content
+                    final_msg = f"""---
+
+## 🖼️ 创作完成
+
+{content}
+
+---
+
+💡 *图片已保存，点击可查看大图*"""
                     yield make_chunk(final_msg)
                 else:
                     yield make_chunk("⚠️ 未能获取到图片内容")
