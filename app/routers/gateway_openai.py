@@ -12,7 +12,7 @@ import time
 import logging
 from typing import Optional, Any, Dict, List
 from fastapi import APIRouter, Request, Depends, HTTPException, Header
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 import httpx
@@ -431,7 +431,7 @@ async def chat_completions(
     _auth: bool = Depends(verify_gateway_auth)
 ):
     """
-    Chat completions with image support (non-streaming).
+    Chat completions with image support (streaming and non-streaming).
     
     CRITICAL: This endpoint handles multi-turn conversations where images
     may be referenced by URL in the messages. Before forwarding to upstream,
@@ -440,7 +440,7 @@ async def chat_completions(
     Flow:
     1. Receive chat completion request with messages
     2. Use PayloadRewriter to convert ALL image URLs to base64
-    3. Forward to upstream API
+    3. Forward to upstream API (streaming or non-streaming based on request)
     4. Process response:
        - If response contains images (base64), save them and return URLs
        - If response is text, pass through as-is
@@ -465,6 +465,9 @@ async def chat_completions(
     if not body.get("messages"):
         return create_error_response("Missing required field: messages", "invalid_request", 400)
     
+    # Check if streaming is requested
+    is_streaming = body.get("stream", False)
+    
     # Create payload rewriter to convert URLs to base64
     rewriter = await create_rewriter(db, settings)
     
@@ -487,9 +490,6 @@ async def chat_completions(
             400
         )
     
-    # Ensure we're using non-streaming mode
-    rewritten_body["stream"] = False
-    
     # Map model name: replace gateway model with upstream model
     if rewritten_body.get("model") == settings.gateway_model_name:
         rewritten_body["model"] = settings.upstream_model_name or rewritten_body.get("model")
@@ -501,43 +501,112 @@ async def chat_completions(
     )
     
     msg_count = len(rewritten_body.get("messages", []))
+    
+    # Handle streaming mode
+    if is_streaming:
+        add_log("INFO", f"📤 发起流式对话请求: {msg_count} 条消息")
+        return await _handle_streaming_chat(client, rewritten_body, settings, request, db)
+    
+    # Non-streaming mode
+    rewritten_body["stream"] = False
     add_log("INFO", f"📤 发起对话请求: {msg_count} 条消息")
     
-    try:
-        # Call upstream API for chat completions
-        upstream_response = await client.chat_completions(
-            messages=rewritten_body.get("messages", []),
-            model=rewritten_body.get("model", settings.upstream_model_name or "gpt-4-vision-preview"),
-            **{k: v for k, v in rewritten_body.items() if k not in ("messages", "model", "stream")}
-        )
-        add_log("INFO", f"📥 上游对话返回成功")
-    except httpx.HTTPStatusError as e:
-        logger.error(f"Upstream API error: {e}")
-        # Try to extract error message
+    # Retry mechanism: try up to 3 times
+    max_retries = 3
+    last_error = None
+    last_error_detail = None
+    last_error_response = None
+    
+    for attempt in range(1, max_retries + 1):
         try:
-            error_detail = e.response.json().get("error", {}).get("message", str(e))
-        except Exception:
-            error_detail = str(e.response.status_code)
-        add_log("ERROR", f"❌ 上游对话错误: {error_detail[:50]}")
-        return create_error_response(
-            f"Upstream API error: {error_detail}",
-            "upstream_error",
-            502
-        )
-    except httpx.RequestError as e:
-        logger.error(f"Upstream connection error: {e}")
-        return create_error_response(
-            "Failed to connect to upstream API",
-            "connection_error",
-            502
-        )
-    except Exception as e:
-        logger.error(f"Unexpected error calling upstream: {e}")
-        return create_error_response(
-            "Internal error processing request",
-            "internal_error",
-            500
-        )
+            # Call upstream API for chat completions
+            upstream_response = await client.chat_completions(
+                messages=rewritten_body.get("messages", []),
+                model=rewritten_body.get("model", settings.upstream_model_name or "gpt-4-vision-preview"),
+                **{k: v for k, v in rewritten_body.items() if k not in ("messages", "model", "stream")}
+            )
+            add_log("INFO", f"📥 上游对话返回成功" + (f" (第{attempt}次尝试)" if attempt > 1 else ""))
+            break  # Success, exit retry loop
+            
+        except httpx.HTTPStatusError as e:
+            last_error = e
+            # Try to extract error message and full response
+            try:
+                last_error_response = e.response.text
+                error_json = e.response.json()
+                last_error_detail = error_json.get("error", {}).get("message", str(e))
+            except Exception:
+                last_error_detail = str(e.response.status_code)
+                last_error_response = e.response.text if hasattr(e.response, 'text') else str(e)
+            
+            logger.warning(f"Upstream API error (attempt {attempt}/{max_retries}): {last_error_detail[:100]}")
+            add_log("WARNING", f"⚠️ 上游错误 (尝试 {attempt}/{max_retries}): {last_error_detail[:50]}")
+            
+            if attempt < max_retries:
+                import asyncio
+                await asyncio.sleep(1)  # Wait 1 second before retry
+                continue
+                
+        except httpx.RequestError as e:
+            last_error = e
+            last_error_detail = f"Connection error: {str(e)}"
+            last_error_response = str(e)
+            
+            logger.warning(f"Upstream connection error (attempt {attempt}/{max_retries}): {e}")
+            add_log("WARNING", f"⚠️ 连接错误 (尝试 {attempt}/{max_retries}): {str(e)[:50]}")
+            
+            if attempt < max_retries:
+                import asyncio
+                await asyncio.sleep(1)
+                continue
+                
+        except Exception as e:
+            last_error = e
+            last_error_detail = f"Unexpected error: {str(e)}"
+            last_error_response = str(e)
+            
+            logger.warning(f"Unexpected error (attempt {attempt}/{max_retries}): {e}")
+            add_log("WARNING", f"⚠️ 异常 (尝试 {attempt}/{max_retries}): {str(e)[:50]}")
+            
+            if attempt < max_retries:
+                import asyncio
+                await asyncio.sleep(1)
+                continue
+    else:
+        # All retries failed - return error info as content for debugging
+        logger.error(f"All {max_retries} attempts failed. Last error: {last_error_detail}")
+        add_log("ERROR", f"❌ 所有 {max_retries} 次重试均失败")
+        
+        # Build error message as chat content for client debugging
+        error_content = f"""⚠️ **上游API请求失败 (已重试{max_retries}次)**
+
+**错误信息:** {last_error_detail}
+
+**完整响应:**
+```
+{last_error_response[:2000] if last_error_response else 'N/A'}
+```
+
+请检查上游API服务是否正常运行。"""
+        
+        # Return as a valid chat completion response with error as content
+        return {
+            "id": f"chatcmpl-error-{int(time.time())}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": rewritten_body.get("model", "unknown"),
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": error_content
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        }
     
     # Process response - check if any images need to be saved
     # Some models return images in the response as base64
@@ -557,6 +626,284 @@ async def chat_completions(
         return upstream_response
 
 
+async def _handle_streaming_chat(
+    client: UpstreamClient,
+    rewritten_body: Dict[str, Any],
+    settings,
+    request: Request,
+    db: AsyncSession
+) -> StreamingResponse:
+    """
+    Handle streaming chat completions with interactive progress updates.
+    
+    For image generation requests, provides:
+    1. Welcome message immediately
+    2. Timer updates every 3 seconds
+    3. Processing notification when image is received
+    4. Final image URL delivery
+    
+    For regular chat, streams response directly.
+    """
+    import asyncio
+    import json as json_module
+    
+    model_name = rewritten_body.get("model", "unknown")
+    chat_id = f"chatcmpl-{int(time.time() * 1000)}"
+    
+    def make_chunk(content: str, finish_reason=None, include_role=False):
+        """Helper to create a valid SSE chunk."""
+        delta = {"content": content}
+        if include_role:
+            delta["role"] = "assistant"
+        
+        chunk = {
+            "id": chat_id,
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": model_name,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": delta if not finish_reason else {},
+                    "finish_reason": finish_reason
+                }
+            ]
+        }
+        return f"data: {json_module.dumps(chunk, ensure_ascii=False)}\n\n"
+    
+    # Check if this is likely an image generation request (heuristic)
+    messages = rewritten_body.get("messages", [])
+    last_message = messages[-1] if messages else {}
+    last_content = last_message.get("content", "") if isinstance(last_message.get("content"), str) else ""
+    
+    # Keywords that suggest image generation
+    image_keywords = ["画", "绘", "生成图", "图片", "draw", "paint", "generate", "image", "picture", "创作"]
+    is_image_request = any(kw in last_content.lower() for kw in image_keywords)
+    
+    async def generate_interactive_stream():
+        """Generate stream with interactive progress updates for image requests."""
+        
+        # Send welcome message immediately
+        welcome_msg = "🍌 中转网关服务器已收到您的消息，正在请求 nano banana🍌 模型绘制图片中，绘制成功后将返回您图片URL/文件，请耐心等待...\n\n"
+        yield make_chunk(welcome_msg, include_role=True)
+        
+        # Start the upstream request in background
+        max_retries = 3
+        upstream_response = None
+        last_error_detail = None
+        last_error_response = None
+        last_status_code = None
+        
+        async def fetch_upstream():
+            nonlocal upstream_response, last_error_detail, last_error_response, last_status_code
+            for attempt in range(1, max_retries + 1):
+                try:
+                    # Use non-streaming for image generation
+                    rewritten_body["stream"] = False
+                    upstream_response = await client.chat_completions(
+                        messages=rewritten_body.get("messages", []),
+                        model=rewritten_body.get("model", settings.upstream_model_name or "gpt-4-vision-preview"),
+                        **{k: v for k, v in rewritten_body.items() if k not in ("messages", "model", "stream")}
+                    )
+                    add_log("INFO", f"📥 上游返回成功" + (f" (第{attempt}次尝试)" if attempt > 1 else ""))
+                    return True
+                except httpx.HTTPStatusError as e:
+                    last_status_code = e.response.status_code
+                    try:
+                        last_error_response = e.response.text
+                        error_json = e.response.json() if hasattr(e.response, 'json') else {}
+                        last_error_detail = error_json.get("error", {}).get("message", str(e))
+                    except:
+                        last_error_detail = str(e.response.status_code)
+                    
+                    logger.warning(f"Upstream error (attempt {attempt}/{max_retries}): {last_error_detail[:100]}")
+                    add_log("WARNING", f"⚠️ 上游错误 (尝试 {attempt}/{max_retries}): {last_error_detail[:50]}")
+                    
+                    if attempt < max_retries:
+                        await asyncio.sleep(1)
+                except httpx.RequestError as e:
+                    last_error_detail = f"Connection error: {str(e)}"
+                    logger.warning(f"Connection error (attempt {attempt}/{max_retries}): {e}")
+                    add_log("WARNING", f"⚠️ 连接错误 (尝试 {attempt}/{max_retries}): {str(e)[:50]}")
+                    
+                    if attempt < max_retries:
+                        await asyncio.sleep(1)
+                except Exception as e:
+                    last_error_detail = f"Unexpected error: {str(e)}"
+                    logger.warning(f"Unexpected error (attempt {attempt}/{max_retries}): {e}")
+                    add_log("WARNING", f"⚠️ 异常 (尝试 {attempt}/{max_retries}): {str(e)[:50]}")
+                    
+                    if attempt < max_retries:
+                        await asyncio.sleep(1)
+            
+            return False
+        
+        # Create the upstream fetch task
+        fetch_task = asyncio.create_task(fetch_upstream())
+        
+        # Send timer updates while waiting
+        elapsed_seconds = 0
+        while not fetch_task.done():
+            await asyncio.sleep(3)
+            elapsed_seconds += 3
+            
+            if not fetch_task.done():
+                timer_msg = f"⏱️ 已等待 {elapsed_seconds} 秒，nano banana🍌 正在努力绘制中...\n"
+                yield make_chunk(timer_msg)
+        
+        # Get the result
+        success = await fetch_task
+        
+        if not success:
+            # All retries failed
+            add_log("ERROR", f"❌ 所有 {max_retries} 次重试均失败")
+            error_msg = f"""\n\n⚠️ **上游API请求失败 (已重试{max_retries}次)**
+
+**HTTP状态码:** {last_status_code or 'N/A'}
+
+**错误信息:** {last_error_detail}
+
+**完整响应:**
+```
+{(last_error_response or 'N/A')[:2000]}
+```
+
+请检查上游API服务是否正常运行。"""
+            yield make_chunk(error_msg)
+            yield make_chunk("", finish_reason="stop")
+            yield "data: [DONE]\n\n"
+            return
+        
+        # Success! Send processing message
+        process_msg = "\n\n🎨 已收到 nano banana🍌 绘制的图片，正在为您自动转换格式中，马上就来！\n\n"
+        yield make_chunk(process_msg)
+        
+        # Process the response to extract/convert images
+        image_store = ImageStore(db)
+        
+        try:
+            processed_response = await _process_chat_response(
+                upstream_response, 
+                image_store, 
+                request, 
+                db
+            )
+            
+            # Extract the content from processed response
+            if processed_response.get("choices"):
+                content = processed_response["choices"][0].get("message", {}).get("content", "")
+                if content:
+                    # Send the final content (image URL)
+                    final_msg = f"✅ 绘制完成！\n\n{content}"
+                    yield make_chunk(final_msg)
+                else:
+                    yield make_chunk("⚠️ 未能获取到图片内容")
+            else:
+                yield make_chunk("⚠️ 响应格式异常")
+                
+        except Exception as e:
+            logger.error(f"Error processing response: {e}")
+            # Fallback: try to extract content directly
+            if upstream_response and upstream_response.get("choices"):
+                content = upstream_response["choices"][0].get("message", {}).get("content", "")
+                yield make_chunk(f"✅ 绘制完成！\n\n{content}" if content else "⚠️ 处理响应时出错")
+            else:
+                yield make_chunk(f"⚠️ 处理响应时出错: {str(e)}")
+        
+        # Send finish
+        yield make_chunk("", finish_reason="stop")
+        yield "data: [DONE]\n\n"
+    
+    async def generate_passthrough_stream():
+        """For non-image requests, pass through upstream stream directly."""
+        rewritten_body["stream"] = True
+        max_retries = 3
+        last_error_detail = None
+        last_error_response = None
+        last_status_code = None
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                async for line in client.chat_completions_stream(
+                    messages=rewritten_body.get("messages", []),
+                    model=rewritten_body.get("model", settings.upstream_model_name or "gpt-4-vision-preview"),
+                    **{k: v for k, v in rewritten_body.items() if k not in ("messages", "model", "stream")}
+                ):
+                    if line:
+                        yield f"{line}\n\n"
+                
+                add_log("INFO", f"📥 流式对话返回成功" + (f" (第{attempt}次尝试)" if attempt > 1 else ""))
+                return
+                
+            except httpx.HTTPStatusError as e:
+                last_status_code = e.response.status_code
+                try:
+                    last_error_response = e.response.text
+                    error_json = e.response.json() if hasattr(e.response, 'json') else {}
+                    last_error_detail = error_json.get("error", {}).get("message", str(e))
+                except:
+                    last_error_detail = str(e.response.status_code)
+                
+                logger.warning(f"Stream error (attempt {attempt}/{max_retries}): {last_error_detail[:100]}")
+                add_log("WARNING", f"⚠️ 流式错误 (尝试 {attempt}/{max_retries}): {last_error_detail[:50]}")
+                
+                if attempt < max_retries:
+                    await asyncio.sleep(1)
+                    
+            except httpx.RequestError as e:
+                last_error_detail = f"Connection error: {str(e)}"
+                logger.warning(f"Stream connection error (attempt {attempt}/{max_retries}): {e}")
+                add_log("WARNING", f"⚠️ 流式连接错误 (尝试 {attempt}/{max_retries}): {str(e)[:50]}")
+                
+                if attempt < max_retries:
+                    await asyncio.sleep(1)
+                    
+            except Exception as e:
+                last_error_detail = f"Unexpected error: {str(e)}"
+                logger.warning(f"Stream unexpected error (attempt {attempt}/{max_retries}): {e}")
+                add_log("WARNING", f"⚠️ 流式异常 (尝试 {attempt}/{max_retries}): {str(e)[:50]}")
+                
+                if attempt < max_retries:
+                    await asyncio.sleep(1)
+        
+        # All retries failed
+        logger.error(f"Stream: All {max_retries} attempts failed. Last error: {last_error_detail}")
+        add_log("ERROR", f"❌ 流式请求: 所有 {max_retries} 次重试均失败")
+        
+        error_content = f"""⚠️ **上游API请求失败 (已重试{max_retries}次)**
+
+**HTTP状态码:** {last_status_code or 'N/A'}
+
+**错误信息:** {last_error_detail}
+
+**完整响应:**
+```
+{(last_error_response or 'N/A')[:2000]}
+```
+
+请检查上游API服务是否正常运行。"""
+        yield make_chunk(error_content, include_role=True)
+        yield make_chunk("", finish_reason="stop")
+        yield "data: [DONE]\n\n"
+    
+    # Choose the appropriate stream generator
+    if is_image_request:
+        generator = generate_interactive_stream()
+    else:
+        generator = generate_passthrough_stream()
+    
+    return StreamingResponse(
+        generator,
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
+
 def _strip_thinking_tags(content: str) -> str:
     """
     Remove <think>...</think> blocks from AI response content.
@@ -568,6 +915,7 @@ def _strip_thinking_tags(content: str) -> str:
     # Pattern matches <think> opening tag, any content (including newlines), and </think> closing tag
     pattern = r'<think>[\s\S]*?</think>\s*'
     return re.sub(pattern, '', content, flags=re.IGNORECASE).strip()
+
 
 
 async def _process_chat_response(

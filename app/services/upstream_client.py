@@ -185,3 +185,53 @@ class UpstreamClient:
                 response.raise_for_status()
             
             return response.json()
+    
+    async def chat_completions_stream(
+        self,
+        messages: List[Dict[str, Any]],
+        model: str,
+        **kwargs
+    ):
+        """
+        Send streaming chat completion request.
+        Yields SSE data lines as they arrive from upstream.
+        
+        Args:
+            messages: Chat messages array
+            model: Model name
+            
+        Yields:
+            Raw SSE data lines (bytes)
+        """
+        url = f"{self.api_base}/chat/completions"
+        
+        payload = {
+            "messages": messages,
+            "model": model,
+            "stream": True,
+        }
+        
+        for key, value in kwargs.items():
+            if value is not None:
+                payload[key] = value
+        
+        logger.info(f"Streaming chat completion with {len(messages)} messages")
+        
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with client.stream(
+                "POST",
+                url,
+                json=payload,
+                headers=self._get_headers()
+            ) as response:
+                if response.status_code != 200:
+                    # Read error response
+                    error_body = await response.aread()
+                    logger.error(f"Upstream stream error: {response.status_code} - {error_body}")
+                    response.raise_for_status()
+                
+                # Yield lines as they come
+                async for line in response.aiter_lines():
+                    if line:
+                        yield line
+
