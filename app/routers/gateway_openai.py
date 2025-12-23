@@ -505,7 +505,7 @@ async def chat_completions(
     # Handle streaming mode
     if is_streaming:
         add_log("INFO", f"📤 发起流式对话请求: {msg_count} 条消息")
-        return await _handle_streaming_chat(client, rewritten_body, settings, request, db)
+        return await _handle_streaming_chat(client, rewritten_body, settings, request, db, body)
     
     # Non-streaming mode
     rewritten_body["stream"] = False
@@ -631,7 +631,8 @@ async def _handle_streaming_chat(
     rewritten_body: Dict[str, Any],
     settings,
     request: Request,
-    db: AsyncSession
+    db: AsyncSession,
+    original_body: Dict[str, Any] = None
 ) -> StreamingResponse:
     """
     Handle streaming chat completions with interactive progress updates.
@@ -692,20 +693,27 @@ async def _handle_streaming_chat(
     else:
         last_content = ""
     
-    # Extract image URLs from the message for display
+    # Extract image URLs from ORIGINAL message (before PayloadRewriter conversion)
+    # This is critical because rewritten_body may have URLs converted to base64 already
     import re
     uploaded_image_urls = []
     
-    # Check for URLs in string content
-    if isinstance(last_content_raw, str):
+    # Use original_body if available, otherwise fall back to rewritten_body
+    source_body = original_body if original_body else rewritten_body
+    source_messages = source_body.get("messages", [])
+    source_last_message = source_messages[-1] if source_messages else {}
+    source_content = source_last_message.get("content", "")
+    
+    # Check for URLs in string content (from original message)
+    if isinstance(source_content, str):
         # Match any http/https URL
         url_pattern = r'https?://[^\s\)\]\"\'<>]+'
-        uploaded_image_urls = re.findall(url_pattern, last_content_raw)
+        uploaded_image_urls = re.findall(url_pattern, source_content)
     
-    # Check for structured content with image_url
+    # Check for structured content with image_url (original message)
     has_structured_image = False
-    if isinstance(last_content_raw, list):
-        for item in last_content_raw:
+    if isinstance(source_content, list):
+        for item in source_content:
             if isinstance(item, dict):
                 if item.get("type") in ("image_url", "image", "input_image"):
                     has_structured_image = True

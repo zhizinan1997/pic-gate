@@ -1,9 +1,0 @@
-{
-  "model": "gemini-draw-gate",
-  "messages": [
-    {
-      "role": "user",
-      "content": "请画一只可爱的小猫"
-    }
-  ]
-}
