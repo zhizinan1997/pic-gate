@@ -730,11 +730,13 @@ async def _handle_streaming_chat(
     
     # Keywords that suggest image generation/editing
     image_keywords = [
-        # 中文关键词
-        "画", "绘", "生成图", "图片", "创作", "设计", "制作",
-        "换成", "替换", "修改", "编辑", "改成", "变成", "调整", "优化",
-        "添加", "删除", "去掉", "加上", "移除", "抠图", "合成",
-        "风格", "滤镜", "特效", "背景", "前景", "颜色", "色调",
+        # 中文关键词 - 生成类
+        "画", "绘", "生成图", "图片", "创作", "设计", "制作", "渲染",
+        # 中文关键词 - 修改类
+        "换成", "替换", "修改", "编辑", "改成", "变成", "变为", "改为", "调整", "优化",
+        "添加", "删除", "去掉", "加上", "移除", "抠图", "合成", "放大", "缩小",
+        # 中文关键词 - 描述类
+        "风格", "滤镜", "特效", "背景", "前景", "颜色", "色调", "场景",
         # 英文关键词
         "draw", "paint", "generate", "image", "picture", "create", "design",
         "edit", "change", "modify", "replace", "swap", "remove", "add",
@@ -742,12 +744,27 @@ async def _handle_streaming_chat(
     ]
     has_image_keywords = any(kw in last_content.lower() for kw in image_keywords)
     
-    # Simplified trigger: ANY URL or structured image content triggers interactive mode
+    # Check ALL messages in conversation for PicGate image URLs (multi-turn support)
+    # This is critical for continuation requests like "change the cat to blue"
+    conversation_has_picgate_url = False
+    for msg in source_messages:
+        msg_content = msg.get("content", "")
+        if isinstance(msg_content, str):
+            # Check for PicGate URLs in any message (user or assistant)
+            if "/images/" in msg_content or "gate.zhizinan.top" in msg_content:
+                conversation_has_picgate_url = True
+                break
+    
+    # Trigger interactive mode if:
+    # 1. Keywords suggest image request, OR
+    # 2. Current message has URLs, OR
+    # 3. Structured image content, OR
+    # 4. Conversation history contains PicGate URLs (multi-turn image editing)
     has_any_url = len(uploaded_image_urls) > 0
     
-    is_image_request = has_image_keywords or has_any_url or has_structured_image
+    is_image_request = has_image_keywords or has_any_url or has_structured_image or conversation_has_picgate_url
     
-    logger.info(f"Image request detection: keywords={has_image_keywords}, urls={len(uploaded_image_urls)}, structured={has_structured_image} -> is_image={is_image_request}")
+    logger.info(f"Image request detection: keywords={has_image_keywords}, urls={len(uploaded_image_urls)}, structured={has_structured_image}, history_picgate={conversation_has_picgate_url} -> is_image={is_image_request}")
     
     async def generate_interactive_stream():
         """Generate stream with interactive progress updates for image requests."""
@@ -855,18 +872,47 @@ async def _handle_streaming_chat(
         if not success:
             # All retries failed
             add_log("ERROR", f"❌ 所有 {max_retries} 次重试均失败")
-            error_msg = f"""\n\n⚠️ **上游API请求失败 (已重试{max_retries}次)**
+            
+            # Special message for HTTP 500 (quota exhausted)
+            if last_status_code == 500:
+                error_msg = """
+
+---
+
+## ⚠️ 服务暂时不可用
+
+**nano banana 🍌 绘图配额已用尽**
+
+服务器每5小时的绘图配额已全部使用完毕，请稍后再试。
+
+💡 *建议等待一段时间后重新发起请求*
+
+---
+"""
+            else:
+                error_msg = f"""
+
+---
+
+## ⚠️ 请求失败
 
 **HTTP状态码:** {last_status_code or 'N/A'}
 
 **错误信息:** {last_error_detail}
 
-**完整响应:**
+<details>
+<summary>点击查看详细响应</summary>
+
 ```
 {(last_error_response or 'N/A')[:2000]}
 ```
 
-请检查上游API服务是否正常运行。"""
+</details>
+
+请检查上游API服务是否正常运行。
+
+---
+"""
             yield make_chunk(error_msg)
             yield make_chunk("", finish_reason="stop")
             yield "data: [DONE]\n\n"
